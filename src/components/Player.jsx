@@ -1,40 +1,49 @@
 import { useRef, useMemo, useEffect, useCallback } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
-import { PointerLockControls } from "@react-three/drei";
+import { useGLTF, useAnimations } from "@react-three/drei";
 import { RigidBody, CapsuleCollider, useRapier } from "@react-three/rapier";
 import * as THREE from "three";
 
 /**
- * First-person physics player for "Laser Escape".
+ * Third-person physics player for "Laser Escape".
  *
- * Self-contained: camera rig, capsule physics, WASD movement, grounded jump,
- * and the click-to-fire head laser all live here. The only thing that crosses
- * the component boundary is `onTargetHit(targetId)` — puzzle logic (open door,
- * disable a laser grid, complete the level) stays in the parent game-state
- * manager (a Zustand store is a natural home for it).
+ * The visible character is the rigged mesh exported from World.blend
+ * (public/player.glb). It is driven by an invisible dynamic capsule:
+ * physics moves the capsule, the model is snapped to it each frame and
+ * yawed toward the movement direction. An orbit camera follows behind,
+ * steered with the mouse while the pointer is locked (click to lock).
  *
- * Targets are any mesh (or group) in the scene tagged with
- * `userData.isTarget = true` (optionally `userData.targetId`). We build a
- * dedicated array from those tags and only raycast against that array — never
- * the whole scene graph. Meshes tagged `userData.isWall` / `userData.isObstacle`
- * are used purely to clamp the length of the visual beam.
+ * The only thing that crosses the component boundary is
+ * `onTargetHit(targetId)`. Targets are meshes tagged
+ * `userData.isTarget = true` (optionally `userData.targetId`); the laser
+ * mesh-raycasts only that array, and uses a cheap physics ray for the
+ * beam's end point on a miss.
  */
 
-const SPEED = 4.5; // m/s horizontal
-const JUMP_SPEED = 5.0; // m/s applied to y on jump
+const SPEED = 5;
+const JUMP_SPEED = 5.5;
 const CAPSULE_RADIUS = 0.3;
-const CAPSULE_HALF_HEIGHT = 0.6; // cylinder half-height (excludes the two caps)
-const HEAD_OFFSET = 0.5; // camera height above the body's translation
-const GROUND_RAY_LEN = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.12; // center -> just past the feet
-const LASER_RANGE = 60;
-const BEAM_MS = 130; // beam fade-out duration
+const CAPSULE_HALF_HEIGHT = 0.6; // cylinder half-height (~1.8 total)
+const FOOT_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // centre -> feet
+
+const MODEL_TARGET_HEIGHT = 1.7; // normalize the glb to this many metres
+const MODEL_FACING = 0; // yaw added so the model faces its travel dir
+
+const CAM_DIST = 5;
+const CAM_LOOK_HEIGHT = 1.5; // look point above the feet
+const CAM_MIN_DIST = 1.0; // don't let wall-collision push closer than this
+const MOUSE_SENS = 0.0022;
+const PITCH_MIN = -0.6;
+const PITCH_MAX = 1.15;
+
+const LASER_RANGE = 80;
+const BEAM_MS = 130;
+const MUZZLE_HEIGHT = 1.5; // beam origin above the feet
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
-const GEO_UP = new THREE.Vector3(0, 1, 0); // cylinder's local long axis
+const GEO_UP = new THREE.Vector3(0, 1, 0);
 const RAY_DOWN = { x: 0, y: -1, z: 0 };
 
-// Manual key map keeps Player provider-free. Swap for drei's
-// <KeyboardControls> + useKeyboardControls if you prefer that pattern.
 const KEYMAP = {
   KeyW: "forward",
   ArrowUp: "forward",
@@ -47,14 +56,48 @@ const KEYMAP = {
   Space: "jump",
 };
 
+function lerpAngle(a, b, t) {
+  let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
 export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   const body = useRef(null); // RapierRigidBody
-  const beam = useRef(null); // reusable world-space beam mesh
-  const viewmodel = useRef(null); // held laser device, follows the camera
+  const rig = useRef(null); // group holding the model, snapped to the capsule
+  const beam = useRef(null); // reused world-space beam mesh
 
-  const { camera, scene } = useThree();
+  const { camera, gl, scene } = useThree();
   const { world, rapier } = useRapier();
 
+  // --- character model ------------------------------------------------------
+  // Single instance -> use the loaded scene directly (cloning a SkinnedMesh
+  // needs SkeletonUtils and isn't worth it for one player).
+  const gltf = useGLTF("/player.glb");
+  const model = gltf.scene;
+  const { actions, names } = useAnimations(gltf.animations, model);
+
+  const fit = useMemo(() => {
+    model.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const s = MODEL_TARGET_HEIGHT / (size.y || 1);
+    const y = -FOOT_OFFSET - box.min.y * s; // lowest point sits at the feet
+    return { scale: s, y };
+  }, [model]);
+
+  useEffect(() => {
+    model.traverse((o) => {
+      if (o.isMesh || o.isSkinnedMesh) {
+        o.castShadow = true;
+        o.frustumCulled = false;
+      }
+    });
+    if (names.length) actions[names[0]]?.reset().play(); // hold the bind pose
+  }, [model, actions, names]);
+
+  // --- input --------------------------------------------------------------
   const input = useRef({
     forward: false,
     back: false,
@@ -62,48 +105,34 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     right: false,
     jump: false,
   });
+  const yaw = useRef(0);
+  const pitch = useRef(0.35);
+  const modelYaw = useRef(0);
 
-  // Dedicated interactable arrays — populated from userData tags, not scanned per-ray.
   const targets = useRef([]);
-  const walls = useRef([]);
-
   const beamState = useRef({
     active: false,
     t0: 0,
     from: new THREE.Vector3(),
     to: new THREE.Vector3(),
   });
-
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
   const tmp = useMemo(
     () => ({
-      forward: new THREE.Vector3(),
+      pos: new THREE.Vector3(),
+      look: new THREE.Vector3(),
+      offset: new THREE.Vector3(),
+      cam: new THREE.Vector3(),
+      fwd: new THREE.Vector3(),
       right: new THREE.Vector3(),
       wish: new THREE.Vector3(),
       dir: new THREE.Vector3(),
-      side: new THREE.Vector3(),
       mid: new THREE.Vector3(),
       origin: new THREE.Vector3(),
     }),
     [],
   );
-
-  // --- build / refresh the interactable arrays from scene tags -------------
-  const collect = useCallback(() => {
-    const t = [];
-    const w = [];
-    scene.traverse((o) => {
-      if (!o.isMesh && !o.userData?.isTarget) return;
-      if (o.userData?.isTarget) t.push(o);
-      else if (o.userData?.isWall || o.userData?.isObstacle) w.push(o);
-    });
-    targets.current = t;
-    walls.current = w;
-  }, [scene]);
-
-  useEffect(() => {
-    collect();
-  }, [collect]);
 
   // --- keyboard ----------------------------------------------------------------
   useEffect(() => {
@@ -118,7 +147,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    window.addEventListener("blur", clear); // don't leave keys stuck on focus loss
+    window.addEventListener("blur", clear);
     return () => {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
@@ -126,7 +155,41 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     };
   }, []);
 
-  // --- resolve a raycast hit up to its tagged target ------------------------
+  // --- pointer lock + mouse look --------------------------------------------
+  useEffect(() => {
+    const el = gl.domElement;
+    const onClick = () => {
+      if (document.pointerLockElement !== el) el.requestPointerLock?.();
+    };
+    const onMove = (e) => {
+      if (document.pointerLockElement !== el) return;
+      yaw.current -= e.movementX * MOUSE_SENS;
+      pitch.current = THREE.MathUtils.clamp(
+        pitch.current + e.movementY * MOUSE_SENS,
+        PITCH_MIN,
+        PITCH_MAX,
+      );
+    };
+    el.addEventListener("click", onClick);
+    document.addEventListener("mousemove", onMove);
+    return () => {
+      el.removeEventListener("click", onClick);
+      document.removeEventListener("mousemove", onMove);
+    };
+  }, [gl]);
+
+  // --- target array from userData tags ------------------------------------
+  const collect = useCallback(() => {
+    const t = [];
+    scene.traverse((o) => {
+      if (o.userData?.isTarget) t.push(o);
+    });
+    targets.current = t;
+  }, [scene]);
+  useEffect(() => {
+    collect();
+  }, [collect]);
+
   const resolveTarget = (obj) => {
     let o = obj;
     while (o) {
@@ -136,101 +199,134 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     return null;
   };
 
-  // --- fire the head laser ---------------------------------------------------
+  // --- fire the laser ----------------------------------------------------
   const fireLaser = useCallback(() => {
-    // Ray from the camera along its forward vector (pitch included — you can
-    // shoot where you look).
+    const rb = body.current;
+    if (!rb) return;
+
     camera.getWorldDirection(tmp.dir);
     raycaster.set(camera.position, tmp.dir);
     raycaster.far = LASER_RANGE;
-
-    // Keep the arrays fresh so doors/targets that spawned or despawned are
-    // reflected. Cheap: one scene walk on click, and we still only *raycast*
-    // the filtered arrays below.
     collect();
 
+    // Precise mesh ray against the small tagged array only.
     const tHit = raycaster.intersectObjects(targets.current, true)[0];
-    const wHit = raycaster.intersectObjects(walls.current, true)[0];
 
-    let hitTarget = null;
+    // Cheap physics ray for where the beam stops on a miss / against the world.
+    const rray = new rapier.Ray(camera.position, tmp.dir);
+    const wHit = world.castRay(
+      rray,
+      LASER_RANGE,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      rb,
+    );
+    const wallToi = wHit ? wHit.timeOfImpact : Infinity;
+
     const to = beamState.current.to;
-    if (tHit && (!wHit || tHit.distance <= wHit.distance)) {
+    let hitTarget = null;
+    if (tHit && tHit.distance <= wallToi) {
       to.copy(tHit.point);
       hitTarget = resolveTarget(tHit.object);
     } else if (wHit) {
-      to.copy(wHit.point);
+      to.copy(camera.position).addScaledVector(tmp.dir, wallToi);
     } else {
       to.copy(camera.position).addScaledVector(tmp.dir, LASER_RANGE);
     }
 
-    // Beam is drawn from a muzzle point offset from the eye (down + right +
-    // slightly forward) so it reads as coming from the held device.
-    tmp.side.set(1, 0, 0).applyQuaternion(camera.quaternion);
-    beamState.current.from
-      .copy(camera.position)
-      .addScaledVector(tmp.side, 0.14)
-      .addScaledVector(WORLD_UP, -0.12)
-      .addScaledVector(tmp.dir, 0.15);
+    // Beam starts at the character's muzzle, not the camera.
+    const t = rb.translation();
+    beamState.current.from.set(t.x, t.y - CAPSULE_HALF_HEIGHT + MUZZLE_HEIGHT, t.z);
     beamState.current.t0 = performance.now();
     beamState.current.active = true;
 
     if (hitTarget) {
       const id =
         hitTarget.userData.targetId ?? hitTarget.name ?? hitTarget.uuid;
-      hitTarget.userData.onHit?.(id); // optional per-target hook
-      onTargetHit?.(id); // parent game-state manager
+      hitTarget.userData.onHit?.(id);
+      onTargetHit?.(id);
     }
-  }, [camera, raycaster, tmp, collect, onTargetHit]);
+  }, [camera, raycaster, tmp, world, rapier, collect, onTargetHit]);
 
-  // Only fire while the pointer is actually locked; the click that *acquires*
-  // the lock (pointerLockElement still null) just locks.
   useEffect(() => {
     const onDown = (e) => {
       if (e.button !== 0) return;
-      if (document.pointerLockElement == null) return;
+      if (document.pointerLockElement !== gl.domElement) return;
       fireLaser();
     };
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
-  }, [fireLaser]);
+  }, [fireLaser, gl]);
 
-  // --- per-frame: camera follow, movement, jump, beam fade -----------------
-  useFrame(() => {
+  // --- per-frame ---------------------------------------------------------
+  useFrame((_, dt) => {
     const rb = body.current;
     if (!rb) return;
+    const step = Math.min(dt, 0.05);
 
-    // Camera sits at head height, tracking the (invisible) capsule.
     const t = rb.translation();
-    camera.position.set(t.x, t.y + HEAD_OFFSET, t.z);
+    tmp.pos.set(t.x, t.y, t.z);
 
-    // Movement basis from camera YAW only — flatten forward onto XZ so looking
-    // up/down never tilts the walk direction.
-    camera.getWorldDirection(tmp.forward);
-    tmp.forward.y = 0;
-    if (tmp.forward.lengthSq() < 1e-6) tmp.forward.set(0, 0, -1);
-    tmp.forward.normalize();
-    tmp.right.crossVectors(tmp.forward, WORLD_UP).normalize(); // forward × up = right
+    // Camera basis: forward is where the camera looks, flattened to XZ.
+    const cy = yaw.current;
+    const cp = pitch.current;
+    tmp.offset
+      .set(
+        Math.sin(cy) * Math.cos(cp),
+        Math.sin(cp),
+        Math.cos(cy) * Math.cos(cp),
+      )
+      .multiplyScalar(CAM_DIST);
+    tmp.look.copy(tmp.pos).addScaledVector(WORLD_UP, CAM_LOOK_HEIGHT - FOOT_OFFSET);
+    tmp.cam.copy(tmp.look).add(tmp.offset);
+
+    // Pull the camera in if a wall is between it and the player.
+    tmp.dir.copy(tmp.cam).sub(tmp.look);
+    const want = tmp.dir.length();
+    tmp.dir.normalize();
+    const camRay = new rapier.Ray(tmp.look, tmp.dir);
+    const camHit = world.castRay(
+      camRay,
+      want,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      rb,
+    );
+    const dist = camHit
+      ? Math.max(CAM_MIN_DIST, camHit.timeOfImpact - 0.15)
+      : want;
+    camera.position.copy(tmp.look).addScaledVector(tmp.dir, dist);
+    camera.lookAt(tmp.look);
+
+    // Movement direction from camera yaw only.
+    tmp.fwd.copy(tmp.look).sub(tmp.cam);
+    tmp.fwd.y = 0;
+    if (tmp.fwd.lengthSq() < 1e-6) tmp.fwd.set(0, 0, -1);
+    tmp.fwd.normalize();
+    tmp.right.crossVectors(tmp.fwd, WORLD_UP).normalize();
 
     const i = input.current;
     const mz = (i.forward ? 1 : 0) - (i.back ? 1 : 0);
     const mx = (i.right ? 1 : 0) - (i.left ? 1 : 0);
     tmp.wish
       .set(0, 0, 0)
-      .addScaledVector(tmp.forward, mz)
+      .addScaledVector(tmp.fwd, mz)
       .addScaledVector(tmp.right, mx);
-    if (tmp.wish.lengthSq() > 0) tmp.wish.normalize().multiplyScalar(SPEED);
+    const moving = tmp.wish.lengthSq() > 0;
+    if (moving) tmp.wish.normalize().multiplyScalar(SPEED);
 
     const v = rb.linvel();
-    // Drive x/z, leave y to gravity / jump.
     rb.setLinvel({ x: tmp.wish.x, y: v.y, z: tmp.wish.z }, true);
 
-    // Grounded check: short ray straight down from the body centre, excluding
-    // the player's own rigid body.
+    // Grounded check + jump.
     tmp.origin.set(t.x, t.y, t.z);
-    const ray = new rapier.Ray(tmp.origin, RAY_DOWN);
     const groundHit = world.castRay(
-      ray,
-      GROUND_RAY_LEN,
+      new rapier.Ray(tmp.origin, RAY_DOWN),
+      FOOT_OFFSET + 0.15,
       true,
       undefined,
       undefined,
@@ -238,11 +334,18 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
       rb,
     );
     const grounded = groundHit != null;
-
-    // Jump only from the ground and only while not already moving up — no
-    // air-jump, no auto-bhop from a held space bar.
     if (i.jump && grounded && v.y <= 0.1) {
       rb.setLinvel({ x: v.x, y: JUMP_SPEED, z: v.z }, true);
+    }
+
+    // Snap the model to the capsule; yaw it toward travel direction.
+    if (rig.current) {
+      rig.current.position.copy(tmp.pos);
+      if (moving) {
+        const target = Math.atan2(tmp.wish.x, tmp.wish.z) + MODEL_FACING;
+        modelYaw.current = lerpAngle(modelYaw.current, target, 1 - Math.pow(0.001, step));
+      }
+      rig.current.rotation.y = modelYaw.current;
     }
 
     // Beam fade.
@@ -268,33 +371,19 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         }
       }
     }
-
-    // Held device follows the camera. NOTE: this simple follow can clip into
-    // near walls. To make it truly clip-proof, render `viewmodel` in a second
-    // pass (overlay scene, gl.autoClear = false, depth cleared) — that's the
-    // pattern the reference repo uses; kept pragmatic here.
-    const vm = viewmodel.current;
-    if (vm) {
-      vm.position.copy(camera.position);
-      vm.quaternion.copy(camera.quaternion);
-    }
   });
 
   return (
     <>
-      {/* Yaw/pitch live entirely in PointerLockControls; we never rotate the body. */}
-      <PointerLockControls />
-
       <RigidBody
         ref={body}
         type="dynamic"
         colliders={false}
         position={spawnPosition}
-        enabledRotations={[false, false, false]} // rotation is camera-only
-        ccd // don't tunnel through walls at speed
+        enabledRotations={[false, false, false]}
+        ccd
         mass={1}
-        gravityScale={1}
-        friction={0} // don't snag on walls
+        friction={0}
         restitution={0}
         linearDamping={0}
         canSleep={false}
@@ -302,9 +391,16 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         <CapsuleCollider args={[CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS]} />
       </RigidBody>
 
-      {/* Reused world-space beam — positioned/scaled/faded each shot. */}
+      {/* visible character, snapped to the capsule every frame */}
+      <group ref={rig}>
+        <group scale={fit.scale} position={[0, fit.y, 0]}>
+          <primitive object={model} />
+        </group>
+      </group>
+
+      {/* reused world-space laser beam */}
       <mesh ref={beam} visible={false} frustumCulled={false}>
-        <cylinderGeometry args={[0.012, 0.012, 1, 6, 1, true]} />
+        <cylinderGeometry args={[0.02, 0.02, 1, 8, 1, true]} />
         <meshBasicMaterial
           color="#ff2d55"
           transparent
@@ -313,18 +409,8 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
           depthWrite={false}
         />
       </mesh>
-
-      {/* Held laser device (viewmodel). The capsule itself renders nothing. */}
-      <group ref={viewmodel}>
-        <mesh position={[0.14, -0.12, -0.28]}>
-          <boxGeometry args={[0.05, 0.05, 0.22]} />
-          <meshStandardMaterial color="#1c1c1f" metalness={0.6} roughness={0.35} />
-        </mesh>
-        <mesh position={[0.14, -0.12, -0.4]}>
-          <cylinderGeometry args={[0.014, 0.014, 0.06, 8]} />
-          <meshBasicMaterial color="#ff2d55" toneMapped={false} />
-        </mesh>
-      </group>
     </>
   );
 }
+
+useGLTF.preload("/player.glb");

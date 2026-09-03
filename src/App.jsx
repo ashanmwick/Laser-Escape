@@ -1,54 +1,77 @@
-import { useCallback, useRef, useState } from "react";
+import { Component, Suspense, useCallback, useState } from "react";
 import { Canvas } from "@react-three/fiber";
-import { Physics, RigidBody } from "@react-three/rapier";
+import { Sky } from "@react-three/drei";
+import { Physics } from "@react-three/rapier";
+import World from "./components/World.jsx";
 import Player from "./components/Player.jsx";
 
+class ErrBoundary extends Component {
+  state = { err: null };
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+  componentDidCatch(err, info) {
+    // eslint-disable-next-line no-console
+    console.error("SCENE ERROR:", err, info);
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            padding: 24,
+            color: "#ff6b81",
+            font: "13px/1.5 monospace",
+            whiteSpace: "pre-wrap",
+            zIndex: 100,
+          }}
+        >
+          {String(this.state.err?.stack || this.state.err)}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 /**
- * Minimal test level for the Player component: a lit room with perimeter
- * walls, a couple of interior dividers, and three shootable targets.
- * Click the canvas to lock the pointer, WASD to move, Space to jump,
- * left-click to fire the head laser at the pink targets.
+ * Laser Escape — third-person playground.
+ * World geometry comes from World.blend (public/world.glb); the player is
+ * the rigged character from the same file (public/player.glb).
+ *
+ * Click to lock the mouse, WASD to move, Space to jump, left-click to fire
+ * the laser at the glowing target blocks. Puzzle logic (which targets are
+ * down, "gate open") lives here — Player only calls onTargetHit.
  */
 
-const WALL_H = 4;
-const ROOM = 20; // half-extent of the floor
-
-function Wall({ position, size }) {
-  return (
-    <RigidBody type="fixed" colliders="cuboid">
-      <mesh position={position} userData={{ isWall: true }} castShadow receiveShadow>
-        <boxGeometry args={size} />
-        <meshStandardMaterial color="#3a3f4b" />
-      </mesh>
-    </RigidBody>
-  );
-}
+const TARGETS = [
+  { id: "target-a", position: [-6, 1.2, 8] },
+  { id: "target-b", position: [8, 1.2, 2] },
+  { id: "target-c", position: [0, 1.6, 16] },
+];
 
 function Target({ id, position, hit, onHit }) {
   return (
-    <RigidBody type="fixed" colliders="cuboid">
-      <mesh
-        position={position}
-        userData={{ isTarget: true, targetId: id, onHit }}
-        castShadow
-      >
-        <boxGeometry args={[0.8, 0.8, 0.8]} />
-        <meshStandardMaterial
-          color={hit ? "#28c76f" : "#ff2d55"}
-          emissive={hit ? "#0d5c33" : "#5c0d22"}
-          emissiveIntensity={0.6}
-        />
-      </mesh>
-    </RigidBody>
+    <mesh
+      position={position}
+      userData={{ isTarget: true, targetId: id, onHit }}
+      castShadow
+    >
+      <boxGeometry args={[0.8, 0.8, 0.8]} />
+      <meshStandardMaterial
+        color={hit ? "#28c76f" : "#ff2d55"}
+        emissive={hit ? "#0d5c33" : "#5c0d22"}
+        emissiveIntensity={0.8}
+      />
+    </mesh>
   );
 }
 
 export default function App() {
   const [hits, setHits] = useState(() => new Set());
-  const hitsRef = useRef(hits);
-  hitsRef.current = hits;
 
-  // Puzzle logic lives here, outside Player — Player only calls onTargetHit.
   const handleTargetHit = useCallback((id) => {
     setHits((prev) => {
       if (prev.has(id)) return prev;
@@ -58,65 +81,51 @@ export default function App() {
     });
   }, []);
 
-  const targets = [
-    { id: "target-a", position: [-6, 1, -8] },
-    { id: "target-b", position: [7, 1, -4] },
-    { id: "target-c", position: [0, 2.4, -14] },
-  ];
-  const allDown = targets.every((t) => hits.has(t.id));
+  const allDown = TARGETS.every((t) => hits.has(t.id));
 
   return (
     <>
-      <Canvas shadows camera={{ fov: 75, near: 0.1, far: 200, position: [0, 1.6, 6] }}>
+      <Canvas shadows camera={{ fov: 70, near: 0.1, far: 500, position: [0, 3, 8] }}>
         <color attach="background" args={["#0b0d12"]} />
-        <fog attach="fog" args={["#0b0d12", 30, 80]} />
-        <ambientLight intensity={0.7} />
-        <hemisphereLight args={["#9fb4d8", "#20242d", 0.6]} />
+        <Sky sunPosition={[40, 30, 20]} turbidity={6} rayleigh={1.5} />
+        <hemisphereLight args={["#bcd4ff", "#4a4436", 0.7]} />
+        <ambientLight intensity={0.35} />
         <directionalLight
-          position={[10, 18, 6]}
-          intensity={1.6}
+          position={[30, 40, 20]}
+          intensity={2.2}
           castShadow
           shadow-mapSize={[2048, 2048]}
+          shadow-camera-left={-60}
+          shadow-camera-right={60}
+          shadow-camera-top={60}
+          shadow-camera-bottom={-60}
+          shadow-camera-far={200}
         />
 
-        <Physics>
-          {/* floor */}
-          <RigidBody type="fixed" colliders="cuboid">
-            <mesh position={[0, -0.5, 0]} userData={{ isWall: true }} receiveShadow>
-              <boxGeometry args={[ROOM * 2, 1, ROOM * 2]} />
-              <meshStandardMaterial color="#20242d" />
-            </mesh>
-          </RigidBody>
-
-          {/* perimeter */}
-          <Wall position={[0, WALL_H / 2, -ROOM]} size={[ROOM * 2, WALL_H, 1]} />
-          <Wall position={[0, WALL_H / 2, ROOM]} size={[ROOM * 2, WALL_H, 1]} />
-          <Wall position={[-ROOM, WALL_H / 2, 0]} size={[1, WALL_H, ROOM * 2]} />
-          <Wall position={[ROOM, WALL_H / 2, 0]} size={[1, WALL_H, ROOM * 2]} />
-
-          {/* interior dividers */}
-          <Wall position={[-3, WALL_H / 2, -6]} size={[1, WALL_H, 12]} />
-          <Wall position={[5, WALL_H / 2, -10]} size={[12, WALL_H, 1]} />
-
-          {targets.map((t) => (
-            <Target
-              key={t.id}
-              id={t.id}
-              position={t.position}
-              hit={hits.has(t.id)}
-              onHit={handleTargetHit}
-            />
-          ))}
-
-          <Player spawnPosition={[0, 2, 4]} onTargetHit={handleTargetHit} />
-        </Physics>
+        <ErrBoundary>
+          <Suspense fallback={null}>
+            <Physics>
+              <World />
+              {TARGETS.map((t) => (
+                <Target
+                  key={t.id}
+                  id={t.id}
+                  position={t.position}
+                  hit={hits.has(t.id)}
+                  onHit={handleTargetHit}
+                />
+              ))}
+              <Player spawnPosition={[0, 2, 2]} onTargetHit={handleTargetHit} />
+            </Physics>
+          </Suspense>
+        </ErrBoundary>
       </Canvas>
 
       <div className="hud">
         Click to lock &nbsp;·&nbsp; <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump
         &nbsp;·&nbsp; <b>Left-click</b> fire
         <br />
-        Targets disabled: {hits.size} / {targets.length}
+        Targets down: {hits.size} / {TARGETS.length}
         {allDown ? "  —  gate open ✔" : ""}
       </div>
     </>
