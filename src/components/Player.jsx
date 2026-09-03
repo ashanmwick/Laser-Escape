@@ -10,8 +10,14 @@ import * as THREE from "three";
  * The visible character is the rigged mesh exported from World.blend
  * (public/player.glb). It is driven by an invisible dynamic capsule:
  * physics moves the capsule, the model is snapped to it each frame and
- * yawed toward the movement direction. An orbit camera follows behind,
- * steered with the mouse while the pointer is locked (click to lock).
+ * yawed toward the movement direction.
+ *
+ * Controls:
+ *  - WASD / arrows  move (relative to the camera), Space jumps
+ *  - right-mouse drag  orbits the camera around the player
+ *  - mouse wheel  zooms the camera in / out
+ *  - left click  fires the laser at whatever is under the cursor in 3D
+ * The OS cursor stays visible the whole time (no pointer lock).
  *
  * player.glb has no locomotion clips (only a T-pose), so the walk cycle is
  * generated procedurally: a set of CC-rig bones are rotated each frame by a
@@ -33,10 +39,13 @@ const FOOT_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // centre -> feet
 const MODEL_TARGET_HEIGHT = 1.7; // normalize the glb to this many metres
 const MODEL_FACING = 0; // yaw added so the model faces its travel dir
 
-const CAM_DIST = 5;
+const CAM_DIST_DEFAULT = 5;
+const CAM_DIST_MIN = 2; // closest zoom
+const CAM_DIST_MAX = 12; // farthest zoom
+const CAM_ZOOM_RATE = 0.0016; // wheel deltaY -> fraction of current distance
 const CAM_LOOK_HEIGHT = 1.5; // look point above the feet
 const CAM_MIN_DIST = 1.0; // don't let wall-collision push closer than this
-const MOUSE_SENS = 0.0022;
+const MOUSE_SENS = 0.0025; // right-drag orbit sensitivity
 const PITCH_MIN = -0.6;
 const PITCH_MAX = 1.15;
 
@@ -149,6 +158,9 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   const yaw = useRef(0);
   const pitch = useRef(0.35);
   const modelYaw = useRef(0);
+  const camDist = useRef(CAM_DIST_DEFAULT); // eased toward by the wheel
+  const camDistTarget = useRef(CAM_DIST_DEFAULT);
+  const orbiting = useRef(false); // right mouse button held
 
   const targets = useRef([]);
   const beamState = useRef({
@@ -196,14 +208,23 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     };
   }, []);
 
-  // --- pointer lock + mouse look --------------------------------------------
+  // --- camera orbit (right-drag) + zoom (wheel), cursor stays visible ------
   useEffect(() => {
     const el = gl.domElement;
-    const onClick = () => {
-      if (document.pointerLockElement !== el) el.requestPointerLock?.();
+    el.style.cursor = "crosshair";
+
+    const onContextMenu = (e) => e.preventDefault(); // right-drag, not a menu
+    const onMouseDown = (e) => {
+      if (e.button === 2) {
+        orbiting.current = true;
+        e.preventDefault();
+      }
+    };
+    const onMouseUp = (e) => {
+      if (e.button === 2) orbiting.current = false;
     };
     const onMove = (e) => {
-      if (document.pointerLockElement !== el) return;
+      if (!orbiting.current) return;
       yaw.current -= e.movementX * MOUSE_SENS;
       pitch.current = THREE.MathUtils.clamp(
         pitch.current + e.movementY * MOUSE_SENS,
@@ -211,11 +232,31 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         PITCH_MAX,
       );
     };
-    el.addEventListener("click", onClick);
-    document.addEventListener("mousemove", onMove);
+    const onWheel = (e) => {
+      e.preventDefault();
+      camDistTarget.current = THREE.MathUtils.clamp(
+        camDistTarget.current + e.deltaY * CAM_ZOOM_RATE * camDistTarget.current,
+        CAM_DIST_MIN,
+        CAM_DIST_MAX,
+      );
+    };
+    const onBlur = () => {
+      orbiting.current = false;
+    };
+
+    el.addEventListener("contextmenu", onContextMenu);
+    el.addEventListener("mousedown", onMouseDown);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("blur", onBlur);
     return () => {
-      el.removeEventListener("click", onClick);
-      document.removeEventListener("mousemove", onMove);
+      el.removeEventListener("contextmenu", onContextMenu);
+      el.removeEventListener("mousedown", onMouseDown);
+      el.removeEventListener("wheel", onWheel);
+      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("blur", onBlur);
     };
   }, [gl]);
 
@@ -240,65 +281,77 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     return null;
   };
 
-  // --- fire the laser ----------------------------------------------------
-  const fireLaser = useCallback(() => {
-    const rb = body.current;
-    if (!rb) return;
+  // --- fire the laser at a screen point (NDC -1..1) ---------------------
+  const fireLaser = useCallback(
+    (ndcX, ndcY) => {
+      const rb = body.current;
+      if (!rb) return;
 
-    camera.getWorldDirection(tmp.dir);
-    raycaster.set(camera.position, tmp.dir);
-    raycaster.far = LASER_RANGE;
-    collect();
+      // Ray from the camera through the cursor into the world.
+      raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+      raycaster.far = LASER_RANGE;
+      const origin = raycaster.ray.origin;
+      tmp.dir.copy(raycaster.ray.direction);
+      collect();
 
-    // Precise mesh ray against the small tagged array only.
-    const tHit = raycaster.intersectObjects(targets.current, true)[0];
+      // Precise mesh ray against the small tagged array only.
+      const tHit = raycaster.intersectObjects(targets.current, true)[0];
 
-    // Cheap physics ray for where the beam stops on a miss / against the world.
-    const rray = new rapier.Ray(camera.position, tmp.dir);
-    const wHit = world.castRay(
-      rray,
-      LASER_RANGE,
-      true,
-      undefined,
-      undefined,
-      undefined,
-      rb,
-    );
-    const wallToi = wHit ? wHit.timeOfImpact : Infinity;
+      // Cheap physics ray for where the beam stops on a miss / against the world.
+      const rray = new rapier.Ray(origin, tmp.dir);
+      const wHit = world.castRay(
+        rray,
+        LASER_RANGE,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        rb,
+      );
+      const wallToi = wHit ? wHit.timeOfImpact : Infinity;
 
-    const to = beamState.current.to;
-    let hitTarget = null;
-    if (tHit && tHit.distance <= wallToi) {
-      to.copy(tHit.point);
-      hitTarget = resolveTarget(tHit.object);
-    } else if (wHit) {
-      to.copy(camera.position).addScaledVector(tmp.dir, wallToi);
-    } else {
-      to.copy(camera.position).addScaledVector(tmp.dir, LASER_RANGE);
-    }
+      const to = beamState.current.to;
+      let hitTarget = null;
+      if (tHit && tHit.distance <= wallToi) {
+        to.copy(tHit.point);
+        hitTarget = resolveTarget(tHit.object);
+      } else if (wHit) {
+        to.copy(origin).addScaledVector(tmp.dir, wallToi);
+      } else {
+        to.copy(origin).addScaledVector(tmp.dir, LASER_RANGE);
+      }
 
-    // Beam starts at the character's muzzle, not the camera.
-    const t = rb.translation();
-    beamState.current.from.set(t.x, t.y - CAPSULE_HALF_HEIGHT + MUZZLE_HEIGHT, t.z);
-    beamState.current.t0 = performance.now();
-    beamState.current.active = true;
+      // Beam starts at the character's muzzle, not the camera.
+      const t = rb.translation();
+      beamState.current.from.set(
+        t.x,
+        t.y - CAPSULE_HALF_HEIGHT + MUZZLE_HEIGHT,
+        t.z,
+      );
+      beamState.current.t0 = performance.now();
+      beamState.current.active = true;
 
-    if (hitTarget) {
-      const id =
-        hitTarget.userData.targetId ?? hitTarget.name ?? hitTarget.uuid;
-      hitTarget.userData.onHit?.(id);
-      onTargetHit?.(id);
-    }
-  }, [camera, raycaster, tmp, world, rapier, collect, onTargetHit]);
+      if (hitTarget) {
+        const id =
+          hitTarget.userData.targetId ?? hitTarget.name ?? hitTarget.uuid;
+        hitTarget.userData.onHit?.(id);
+        onTargetHit?.(id);
+      }
+    },
+    [camera, raycaster, tmp, world, rapier, collect, onTargetHit],
+  );
 
   useEffect(() => {
+    const el = gl.domElement;
     const onDown = (e) => {
-      if (e.button !== 0) return;
-      if (document.pointerLockElement !== gl.domElement) return;
-      fireLaser();
+      if (e.button !== 0) return; // left click only; right is orbit
+      const r = el.getBoundingClientRect();
+      const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+      const ny = -((e.clientY - r.top) / r.height) * 2 + 1;
+      fireLaser(nx, ny);
     };
-    document.addEventListener("pointerdown", onDown);
-    return () => document.removeEventListener("pointerdown", onDown);
+    el.addEventListener("pointerdown", onDown);
+    return () => el.removeEventListener("pointerdown", onDown);
   }, [fireLaser, gl]);
 
   // --- per-frame ---------------------------------------------------------
@@ -311,6 +364,12 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     tmp.pos.set(t.x, t.y, t.z);
 
     // Camera basis: forward is where the camera looks, flattened to XZ.
+    camDist.current = THREE.MathUtils.damp(
+      camDist.current,
+      camDistTarget.current,
+      12,
+      step,
+    );
     const cy = yaw.current;
     const cp = pitch.current;
     tmp.offset
@@ -319,7 +378,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         Math.sin(cp),
         Math.cos(cy) * Math.cos(cp),
       )
-      .multiplyScalar(CAM_DIST);
+      .multiplyScalar(camDist.current);
     tmp.look.copy(tmp.pos).addScaledVector(WORLD_UP, CAM_LOOK_HEIGHT - FOOT_OFFSET);
     tmp.cam.copy(tmp.look).add(tmp.offset);
 
