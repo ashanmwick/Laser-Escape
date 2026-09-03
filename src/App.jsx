@@ -122,8 +122,9 @@ export default function App() {
       </Canvas>
 
       <div className="hud">
-        Click to lock &nbsp;·&nbsp; <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump
-        &nbsp;·&nbsp; <b>Left-click</b> fire
+        <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump &nbsp;·&nbsp;{" "}
+        <b>Hold left-click</b> fire at cursor &nbsp;·&nbsp; <b>Right-drag</b> orbit
+        &nbsp;·&nbsp; <b>Scroll</b> zoom
         <br />
         Targets down: {hits.size} / {TARGETS.length}
         {allDown ? "  —  gate open ✔" : ""}

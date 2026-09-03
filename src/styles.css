@@ -14,21 +14,6 @@ body,
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-/* fixed crosshair */
-#root::after {
-  content: "";
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 6px;
-  height: 6px;
-  margin: -3px 0 0 -3px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
-  pointer-events: none;
-  z-index: 10;
-}
-
 .hud {
   position: fixed;
   left: 16px;
