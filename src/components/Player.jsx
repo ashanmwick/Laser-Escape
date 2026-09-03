@@ -16,7 +16,8 @@ import * as THREE from "three";
  *  - WASD / arrows  move (relative to the camera), Space jumps
  *  - right-mouse drag  orbits the camera around the player
  *  - mouse wheel  zooms the camera in / out
- *  - left click  fires the laser at whatever is under the cursor in 3D
+ *  - hold left click  fires a continuous laser at whatever is under the
+ *    cursor in 3D (release to let it fade)
  * The OS cursor stays visible the whole time (no pointer lock).
  *
  * player.glb has no locomotion clips (only a T-pose), so the walk cycle is
@@ -163,9 +164,12 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   const orbiting = useRef(false); // right mouse button held
 
   const targets = useRef([]);
+  const firing = useRef(false); // left mouse button held
+  const aim = useRef({ x: 0, y: 0 }); // cursor position in NDC
+  const heldHitId = useRef(null); // target currently under the held beam
   const beamState = useRef({
-    active: false,
-    t0: 0,
+    held: false,
+    releaseT0: 0,
     from: new THREE.Vector3(),
     to: new THREE.Vector3(),
   });
@@ -281,23 +285,22 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     return null;
   };
 
-  // --- fire the laser at a screen point (NDC -1..1) ---------------------
-  const fireLaser = useCallback(
-    (ndcX, ndcY) => {
+  // Cast the beam from the muzzle toward the screen point (NDC -1..1),
+  // writing beamState.from/to. When `trigger`, notify a target the first
+  // frame the beam lands on it (re-notifies if it sweeps onto a new one).
+  const castBeam = useCallback(
+    (ndcX, ndcY, trigger) => {
       const rb = body.current;
       if (!rb) return;
 
-      // Ray from the camera through the cursor into the world.
       raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
       raycaster.far = LASER_RANGE;
       const origin = raycaster.ray.origin;
       tmp.dir.copy(raycaster.ray.direction);
       collect();
 
-      // Precise mesh ray against the small tagged array only.
       const tHit = raycaster.intersectObjects(targets.current, true)[0];
 
-      // Cheap physics ray for where the beam stops on a miss / against the world.
       const rray = new rapier.Ray(origin, tmp.dir);
       const wHit = world.castRay(
         rray,
@@ -321,38 +324,62 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         to.copy(origin).addScaledVector(tmp.dir, LASER_RANGE);
       }
 
-      // Beam starts at the character's muzzle, not the camera.
       const t = rb.translation();
       beamState.current.from.set(
         t.x,
         t.y - CAPSULE_HALF_HEIGHT + MUZZLE_HEIGHT,
         t.z,
       );
-      beamState.current.t0 = performance.now();
-      beamState.current.active = true;
 
-      if (hitTarget) {
-        const id =
-          hitTarget.userData.targetId ?? hitTarget.name ?? hitTarget.uuid;
+      const id = hitTarget
+        ? (hitTarget.userData.targetId ?? hitTarget.name ?? hitTarget.uuid)
+        : null;
+      if (trigger && id && id !== heldHitId.current) {
         hitTarget.userData.onHit?.(id);
         onTargetHit?.(id);
       }
+      if (trigger) heldHitId.current = id;
     },
     [camera, raycaster, tmp, world, rapier, collect, onTargetHit],
   );
 
+  // Left button held -> keep firing; release -> let the beam fade.
   useEffect(() => {
     const el = gl.domElement;
-    const onDown = (e) => {
-      if (e.button !== 0) return; // left click only; right is orbit
+    const ndc = (e) => {
       const r = el.getBoundingClientRect();
-      const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
-      const ny = -((e.clientY - r.top) / r.height) * 2 + 1;
-      fireLaser(nx, ny);
+      aim.current.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+      aim.current.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+    };
+    const onDown = (e) => {
+      if (e.button !== 0) return; // left only; right is orbit
+      ndc(e);
+      firing.current = true;
+      beamState.current.held = true;
+      heldHitId.current = null;
+    };
+    const onMove = (e) => ndc(e);
+    const stop = () => {
+      if (!firing.current) return;
+      firing.current = false;
+      beamState.current.held = false;
+      beamState.current.releaseT0 = performance.now();
+      heldHitId.current = null;
+    };
+    const onUp = (e) => {
+      if (e.button === 0) stop();
     };
     el.addEventListener("pointerdown", onDown);
-    return () => el.removeEventListener("pointerdown", onDown);
-  }, [fireLaser, gl]);
+    el.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("blur", stop);
+    return () => {
+      el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("blur", stop);
+    };
+  }, [castBeam, gl]);
 
   // --- per-frame ---------------------------------------------------------
   useFrame((_, dt) => {
@@ -481,27 +508,33 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
       inner.current.position.y = fit.y + Math.abs(sw) * 0.04 * g;
     }
 
-    // Beam fade.
+    // Laser beam: continuous while the button is held, then a short fade.
     const bs = beamState.current;
     const mesh = beam.current;
     if (mesh) {
-      if (!bs.active) {
-        mesh.visible = false;
-      } else {
-        const age = performance.now() - bs.t0;
+      const drawBeam = (opacity) => {
+        const len = bs.from.distanceTo(bs.to);
+        tmp.mid.copy(bs.from).add(bs.to).multiplyScalar(0.5);
+        tmp.dir.copy(bs.to).sub(bs.from).normalize();
+        mesh.position.copy(tmp.mid);
+        mesh.quaternion.setFromUnitVectors(GEO_UP, tmp.dir);
+        mesh.scale.set(1, Math.max(len, 0.001), 1);
+        mesh.material.opacity = opacity;
+        mesh.visible = true;
+      };
+      if (firing.current) {
+        castBeam(aim.current.x, aim.current.y, true);
+        drawBeam(0.8 + 0.2 * Math.sin(performance.now() * 0.05)); // hum
+      } else if (bs.releaseT0) {
+        const age = performance.now() - bs.releaseT0;
         if (age >= BEAM_MS) {
-          bs.active = false;
+          bs.releaseT0 = 0;
           mesh.visible = false;
         } else {
-          const len = bs.from.distanceTo(bs.to);
-          tmp.mid.copy(bs.from).add(bs.to).multiplyScalar(0.5);
-          tmp.dir.copy(bs.to).sub(bs.from).normalize();
-          mesh.position.copy(tmp.mid);
-          mesh.quaternion.setFromUnitVectors(GEO_UP, tmp.dir);
-          mesh.scale.set(1, len, 1);
-          mesh.material.opacity = 1 - age / BEAM_MS;
-          mesh.visible = true;
+          drawBeam(1 - age / BEAM_MS);
         }
+      } else {
+        mesh.visible = false;
       }
     }
   });

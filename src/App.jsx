@@ -123,7 +123,7 @@ export default function App() {
 
       <div className="hud">
         <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump &nbsp;·&nbsp;{" "}
-        <b>Left-click</b> fire at cursor &nbsp;·&nbsp; <b>Right-drag</b> orbit
+        <b>Hold left-click</b> fire at cursor &nbsp;·&nbsp; <b>Right-drag</b> orbit
         &nbsp;·&nbsp; <b>Scroll</b> zoom
         <br />
         Targets down: {hits.size} / {TARGETS.length}
