@@ -5,3 +5,8 @@
 # OS / editor cruft
 Thumbs.db
 .DS_Store
+
+# Node / Vite
+node_modules/
+dist/
+*.local
