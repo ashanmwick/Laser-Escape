@@ -38,6 +38,11 @@ const CAPSULE_HALF_HEIGHT = 0.6; // cylinder half-height (~1.8 total)
 const FOOT_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // centre -> feet
 
 const MODEL_TARGET_HEIGHT = 1.7; // normalize the glb to this many metres
+// Loose sanity clamp on the normalised scale: only there to stop a degenerate
+// measurement from filling the screen or vanishing. player.glb needs ~0.27x;
+// a conventionally-scaled glb would be ~1x -- both sit comfortably inside.
+const MODEL_SCALE_MIN = 0.02;
+const MODEL_SCALE_MAX = 20;
 const MODEL_FACING = 0; // yaw added so the model faces its travel dir
 
 const CAM_DIST_DEFAULT = 5;
@@ -114,11 +119,41 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   const phase = useRef(0); // walk-cycle phase
   const gait = useRef(0); // 0 idle .. 1 full-speed, eased
 
+  // Height-normalise the model to MODEL_TARGET_HEIGHT.
+  //
+  // Measure it *detached from its parent*: the model is rendered inside a group
+  // that carries `fit.scale`, so measuring it in place feeds the previous
+  // frame's scale back into the box and the value never settles. In `npm run
+  // dev` the timing happened to converge near the right number; a production
+  // build read a matrixWorld still carrying a stale scale and the character
+  // came out huge. Nulling `model.parent` for the measurement (restored in the
+  // same synchronous pass, before React commits) breaks that feedback loop and
+  // removes any dependence on render/commit timing.
   const fit = useMemo(() => {
-    model.updateWorldMatrix(true, true);
+    const parent = model.parent;
+    model.parent = null;
+    model.updateWorldMatrix(false, true);
     const box = new THREE.Box3().setFromObject(model);
+    model.parent = parent;
+    model.updateWorldMatrix(true, true);
+
+    if (box.isEmpty()) return { scale: 1, y: -FOOT_OFFSET };
     const size = box.getSize(new THREE.Vector3());
-    const s = MODEL_TARGET_HEIGHT / (size.y || 1);
+    const raw = MODEL_TARGET_HEIGHT / (size.y || 1);
+    const s = THREE.MathUtils.clamp(
+      Number.isFinite(raw) ? raw : 1,
+      MODEL_SCALE_MIN,
+      MODEL_SCALE_MAX,
+    );
+    if (
+      import.meta.env.DEV &&
+      (!Number.isFinite(raw) || raw < MODEL_SCALE_MIN || raw > MODEL_SCALE_MAX)
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[Player] implausible fit scale ${raw} (size.y=${size.y}); clamped to ${s}`,
+      );
+    }
     const y = -FOOT_OFFSET - box.min.y * s; // lowest point sits at the feet
     return { scale: s, y };
   }, [model]);
