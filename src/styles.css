@@ -29,3 +29,150 @@ body,
 .hud b {
   color: #ff2d55;
 }
+
+canvas {
+  touch-action: none;
+}
+
+/* --- touch controls ------------------------------------------------------ */
+
+.touch-controls {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  /* the wrapper itself never blocks anything; only its children opt in */
+  pointer-events: none;
+}
+
+.touch-controls__look {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.touch-controls__reticle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: rgba(255, 45, 85, 0.85);
+  box-shadow: 0 0 4px rgba(255, 45, 85, 0.9);
+  pointer-events: none;
+}
+
+.touch-controls__joystick {
+  position: absolute;
+  left: max(24px, env(safe-area-inset-left));
+  bottom: max(24px, env(safe-area-inset-bottom));
+  width: clamp(90px, 22vmin, 140px);
+  height: clamp(90px, 22vmin, 140px);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.touch-controls__knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 42%;
+  height: 42%;
+  margin-left: -21%;
+  margin-top: -21%;
+  border-radius: 50%;
+  background: rgba(255, 45, 85, 0.55);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.touch-controls__actions {
+  position: absolute;
+  right: max(20px, env(safe-area-inset-right));
+  bottom: max(24px, env(safe-area-inset-bottom));
+  display: flex;
+  align-items: flex-end;
+  gap: clamp(12px, 3vmin, 20px);
+  pointer-events: auto;
+}
+
+.touch-controls__btn {
+  touch-action: none;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  font: 600 clamp(12px, 2.6vmin, 15px) system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.touch-controls__btn--fire {
+  width: clamp(76px, 18vmin, 110px);
+  height: clamp(76px, 18vmin, 110px);
+  border-radius: 50%;
+  background: rgba(255, 45, 85, 0.35);
+}
+
+.touch-controls__btn--jump {
+  width: clamp(60px, 14vmin, 84px);
+  height: clamp(60px, 14vmin, 84px);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.touch-controls__btn:active {
+  filter: brightness(1.4);
+}
+
+/* --- portrait prompt ------------------------------------------------------ */
+
+.portrait-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(6, 7, 10, 0.94);
+  color: #fff;
+  text-align: center;
+  padding: 24px;
+}
+
+.portrait-overlay__icon {
+  font-size: 48px;
+  animation: portrait-overlay-spin 1.6s ease-in-out infinite;
+}
+
+.portrait-overlay p {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.8);
+  max-width: 260px;
+}
+
+@keyframes portrait-overlay-spin {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(90deg);
+  }
+}
+
+@media (max-width: 420px) {
+  .hud {
+    font-size: 11px;
+    left: 10px;
+    bottom: 10px;
+  }
+}

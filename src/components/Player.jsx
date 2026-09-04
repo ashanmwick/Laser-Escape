@@ -3,6 +3,14 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { useGLTF } from "@react-three/drei";
 import { RigidBody, CapsuleCollider, useRapier } from "@react-three/rapier";
 import * as THREE from "three";
+import {
+  CAM_DIST_DEFAULT,
+  CAM_DIST_MIN,
+  CAM_DIST_MAX,
+  MOUSE_SENS,
+  PITCH_MIN,
+  PITCH_MAX,
+} from "../controls.js";
 
 /**
  * Third-person physics player for "Laser Escape".
@@ -24,10 +32,12 @@ import * as THREE from "three";
  * generated procedurally: a set of CC-rig bones are rotated each frame by a
  * `gait` factor that eases 0..1 with speed. Idle just drops the arms.
  *
- * The only thing that crosses the component boundary is
- * `onTargetHit(targetId)`. Targets are meshes tagged
- * `userData.isTarget = true` (optionally `userData.targetId`); the laser
- * mesh-raycasts only that array, and uses a cheap physics ray for the
+ * The only things that cross the component boundary are `onTargetHit(targetId)`
+ * and `controls`, the shared input object from src/controls.js: keyboard/mouse
+ * listeners here and the on-screen touch controls (TouchControls.jsx) both
+ * write into it, this component only reads it each frame. Targets are meshes
+ * tagged `userData.isTarget = true` (optionally `userData.targetId`); the
+ * laser mesh-raycasts only that array, and uses a cheap physics ray for the
  * beam's end point on a miss.
  */
 
@@ -45,15 +55,9 @@ const MODEL_SCALE_MIN = 0.02;
 const MODEL_SCALE_MAX = 20;
 const MODEL_FACING = 0; // yaw added so the model faces its travel dir
 
-const CAM_DIST_DEFAULT = 5;
-const CAM_DIST_MIN = 2; // closest zoom
-const CAM_DIST_MAX = 12; // farthest zoom
 const CAM_ZOOM_RATE = 0.0016; // wheel deltaY -> fraction of current distance
 const CAM_LOOK_HEIGHT = 1.5; // look point above the feet
 const CAM_MIN_DIST = 1.0; // don't let wall-collision push closer than this
-const MOUSE_SENS = 0.0025; // right-drag orbit sensitivity
-const PITCH_MIN = -0.6;
-const PITCH_MAX = 1.15;
 
 const LASER_RANGE = 80;
 const BEAM_MS = 130;
@@ -98,7 +102,7 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
-export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
+export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, controls }) {
   const body = useRef(null); // RapierRigidBody
   const rig = useRef(null); // group holding the model, snapped to the capsule
   const beam = useRef(null); // reused world-space beam mesh
@@ -183,24 +187,15 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     b.quaternion.copy(r).multiply(_q);
   }, []);
 
-  // --- input --------------------------------------------------------------
-  const input = useRef({
-    forward: false,
-    back: false,
-    left: false,
-    right: false,
-    jump: false,
-  });
-  const yaw = useRef(0);
-  const pitch = useRef(0.35);
+  // --- input ---------------------------------------------------------------
+  // `controls` is a shared mutable object (src/controls.js): keyboard/mouse
+  // (below) and the touch overlay both write into it, this component only
+  // reads it (aside from its own keyboard/mouse listeners).
   const modelYaw = useRef(0);
-  const camDist = useRef(CAM_DIST_DEFAULT); // eased toward by the wheel
-  const camDistTarget = useRef(CAM_DIST_DEFAULT);
+  const camDist = useRef(CAM_DIST_DEFAULT); // eased toward controls.camDistTarget
   const orbiting = useRef(false); // right mouse button held
 
   const targets = useRef([]);
-  const firing = useRef(false); // left mouse button held
-  const aim = useRef({ x: 0, y: 0 }); // cursor position in NDC
   const heldHitId = useRef(null); // target currently under the held beam
   const beamState = useRef({
     held: false,
@@ -227,15 +222,30 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   );
 
   // --- keyboard ----------------------------------------------------------------
+  // Tracks raw key state so releasing one of two opposite keys (e.g. still
+  // holding D after tapping A) doesn't zero out movement.
+  const keys = useRef({ forward: false, back: false, left: false, right: false });
   useEffect(() => {
+    const applyMove = () => {
+      const k = keys.current;
+      controls.move.z = (k.forward ? 1 : 0) - (k.back ? 1 : 0);
+      controls.move.x = (k.right ? 1 : 0) - (k.left ? 1 : 0);
+    };
     const set = (code, v) => {
       const k = KEYMAP[code];
-      if (k) input.current[k] = v;
+      if (!k) return;
+      if (k === "jump") controls.jump = v;
+      else {
+        keys.current[k] = v;
+        applyMove();
+      }
     };
     const down = (e) => set(e.code, true);
     const up = (e) => set(e.code, false);
     const clear = () => {
-      for (const k in input.current) input.current[k] = false;
+      for (const k in keys.current) keys.current[k] = false;
+      controls.jump = false;
+      applyMove();
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -245,7 +255,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
       window.removeEventListener("keyup", up);
       window.removeEventListener("blur", clear);
     };
-  }, []);
+  }, [controls]);
 
   // --- camera orbit (right-drag) + zoom (wheel), cursor stays visible ------
   useEffect(() => {
@@ -253,28 +263,29 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     el.style.cursor = "crosshair";
 
     const onContextMenu = (e) => e.preventDefault(); // right-drag, not a menu
-    const onMouseDown = (e) => {
+    const onPointerDown = (e) => {
+      if (e.pointerType === "touch") return; // touch look is handled by TouchControls
       if (e.button === 2) {
         orbiting.current = true;
         e.preventDefault();
       }
     };
-    const onMouseUp = (e) => {
+    const onPointerUp = (e) => {
       if (e.button === 2) orbiting.current = false;
     };
     const onMove = (e) => {
-      if (!orbiting.current) return;
-      yaw.current -= e.movementX * MOUSE_SENS;
-      pitch.current = THREE.MathUtils.clamp(
-        pitch.current + e.movementY * MOUSE_SENS,
+      if (e.pointerType === "touch" || !orbiting.current) return;
+      controls.yaw -= e.movementX * MOUSE_SENS;
+      controls.pitch = THREE.MathUtils.clamp(
+        controls.pitch + e.movementY * MOUSE_SENS,
         PITCH_MIN,
         PITCH_MAX,
       );
     };
     const onWheel = (e) => {
       e.preventDefault();
-      camDistTarget.current = THREE.MathUtils.clamp(
-        camDistTarget.current + e.deltaY * CAM_ZOOM_RATE * camDistTarget.current,
+      controls.camDistTarget = THREE.MathUtils.clamp(
+        controls.camDistTarget + e.deltaY * CAM_ZOOM_RATE * controls.camDistTarget,
         CAM_DIST_MIN,
         CAM_DIST_MAX,
       );
@@ -284,20 +295,20 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     };
 
     el.addEventListener("contextmenu", onContextMenu);
-    el.addEventListener("mousedown", onMouseDown);
+    el.addEventListener("pointerdown", onPointerDown);
     el.addEventListener("wheel", onWheel, { passive: false });
-    window.addEventListener("mouseup", onMouseUp);
-    window.addEventListener("mousemove", onMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointermove", onMove);
     window.addEventListener("blur", onBlur);
     return () => {
       el.removeEventListener("contextmenu", onContextMenu);
-      el.removeEventListener("mousedown", onMouseDown);
+      el.removeEventListener("pointerdown", onPointerDown);
       el.removeEventListener("wheel", onWheel);
-      window.removeEventListener("mouseup", onMouseUp);
-      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointermove", onMove);
       window.removeEventListener("blur", onBlur);
     };
-  }, [gl]);
+  }, [gl, controls]);
 
   // --- target array from userData tags ------------------------------------
   const collect = useCallback(() => {
@@ -379,29 +390,35 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
   );
 
   // Left button held -> keep firing; release -> let the beam fade.
+  // Touch fire is handled entirely by TouchControls (button + centered aim),
+  // so touch pointer events here are ignored to avoid firing on every tap.
   useEffect(() => {
     const el = gl.domElement;
     const ndc = (e) => {
       const r = el.getBoundingClientRect();
-      aim.current.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-      aim.current.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+      controls.aim.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+      controls.aim.y = -((e.clientY - r.top) / r.height) * 2 + 1;
     };
     const onDown = (e) => {
-      if (e.button !== 0) return; // left only; right is orbit
+      if (e.pointerType === "touch" || e.button !== 0) return; // left only; right is orbit
       ndc(e);
-      firing.current = true;
+      controls.firing = true;
       beamState.current.held = true;
       heldHitId.current = null;
     };
-    const onMove = (e) => ndc(e);
+    const onMove = (e) => {
+      if (e.pointerType === "touch") return;
+      ndc(e);
+    };
     const stop = () => {
-      if (!firing.current) return;
-      firing.current = false;
+      if (!controls.firing) return;
+      controls.firing = false;
       beamState.current.held = false;
       beamState.current.releaseT0 = performance.now();
       heldHitId.current = null;
     };
     const onUp = (e) => {
+      if (e.pointerType === "touch") return;
       if (e.button === 0) stop();
     };
     el.addEventListener("pointerdown", onDown);
@@ -414,7 +431,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("blur", stop);
     };
-  }, [castBeam, gl]);
+  }, [castBeam, gl, controls]);
 
   // --- per-frame ---------------------------------------------------------
   useFrame((_, dt) => {
@@ -428,12 +445,12 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     // Camera basis: forward is where the camera looks, flattened to XZ.
     camDist.current = THREE.MathUtils.damp(
       camDist.current,
-      camDistTarget.current,
+      controls.camDistTarget,
       12,
       step,
     );
-    const cy = yaw.current;
-    const cp = pitch.current;
+    const cy = controls.yaw;
+    const cp = controls.pitch;
     tmp.offset
       .set(
         Math.sin(cy) * Math.cos(cp),
@@ -474,15 +491,17 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
     tmp.fwd.normalize();
     tmp.right.crossVectors(tmp.fwd, WORLD_UP).normalize();
 
-    const i = input.current;
-    const mz = (i.forward ? 1 : 0) - (i.back ? 1 : 0);
-    const mx = (i.right ? 1 : 0) - (i.left ? 1 : 0);
+    const mz = controls.move.z;
+    const mx = controls.move.x;
     tmp.wish
       .set(0, 0, 0)
       .addScaledVector(tmp.fwd, mz)
       .addScaledVector(tmp.right, mx);
-    const moving = tmp.wish.lengthSq() > 0;
-    if (moving) tmp.wish.normalize().multiplyScalar(SPEED);
+    // Clamp (not normalize) so analog joystick input under full deflection
+    // moves slower, while keyboard's unit/diagonal vectors behave as before.
+    const wishLen = tmp.wish.length();
+    const moving = wishLen > 0.001;
+    if (moving) tmp.wish.multiplyScalar((Math.min(wishLen, 1) / wishLen) * SPEED);
 
     const v = rb.linvel();
     rb.setLinvel({ x: tmp.wish.x, y: v.y, z: tmp.wish.z }, true);
@@ -499,7 +518,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
       rb,
     );
     const grounded = groundHit != null;
-    if (i.jump && grounded && v.y <= 0.1) {
+    if (controls.jump && grounded && v.y <= 0.1) {
       rb.setLinvel({ x: v.x, y: JUMP_SPEED, z: v.z }, true);
     }
 
@@ -557,8 +576,8 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit }) {
         mesh.material.opacity = opacity;
         mesh.visible = true;
       };
-      if (firing.current) {
-        castBeam(aim.current.x, aim.current.y, true);
+      if (controls.firing) {
+        castBeam(controls.aim.x, controls.aim.y, true);
         drawBeam(0.8 + 0.2 * Math.sin(performance.now() * 0.05)); // hum
       } else if (bs.releaseT0) {
         const age = performance.now() - bs.releaseT0;

@@ -1,9 +1,13 @@
-import { Component, Suspense, useCallback, useState } from "react";
+import { Component, Suspense, useCallback, useMemo, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Sky } from "@react-three/drei";
 import { Physics } from "@react-three/rapier";
 import World from "./components/World.jsx";
 import Player from "./components/Player.jsx";
+import TouchControls from "./components/TouchControls.jsx";
+import PortraitOverlay from "./components/PortraitOverlay.jsx";
+import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
+import { createControlsState } from "./controls.js";
 
 class ErrBoundary extends Component {
   state = { err: null };
@@ -71,6 +75,8 @@ function Target({ id, position, hit, onHit }) {
 
 export default function App() {
   const [hits, setHits] = useState(() => new Set());
+  const controls = useMemo(() => createControlsState(), []);
+  const isTouch = useIsTouchDevice();
 
   const handleTargetHit = useCallback((id) => {
     setHits((prev) => {
@@ -115,16 +121,32 @@ export default function App() {
                   onHit={handleTargetHit}
                 />
               ))}
-              <Player spawnPosition={[0, 2, 2]} onTargetHit={handleTargetHit} />
+              <Player
+                spawnPosition={[0, 2, 2]}
+                onTargetHit={handleTargetHit}
+                controls={controls}
+              />
             </Physics>
           </Suspense>
         </ErrBoundary>
       </Canvas>
 
+      {isTouch && <TouchControls controls={controls} />}
+      {isTouch && <PortraitOverlay />}
+
       <div className="hud">
-        <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump &nbsp;·&nbsp;{" "}
-        <b>Hold left-click</b> fire at cursor &nbsp;·&nbsp; <b>Right-drag</b> orbit
-        &nbsp;·&nbsp; <b>Scroll</b> zoom
+        {isTouch ? (
+          <>
+            <b>Left stick</b> move &nbsp;·&nbsp; <b>Drag</b> look &nbsp;·&nbsp;{" "}
+            <b>Pinch</b> zoom &nbsp;·&nbsp; <b>Fire</b> / <b>Jump</b> buttons
+          </>
+        ) : (
+          <>
+            <b>WASD</b> move &nbsp;·&nbsp; <b>Space</b> jump &nbsp;·&nbsp;{" "}
+            <b>Hold left-click</b> fire at cursor &nbsp;·&nbsp; <b>Right-drag</b> orbit
+            &nbsp;·&nbsp; <b>Scroll</b> zoom
+          </>
+        )}
         <br />
         Targets down: {hits.size} / {TARGETS.length}
         {allDown ? "  —  gate open ✔" : ""}
