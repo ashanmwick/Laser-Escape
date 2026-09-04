@@ -13,18 +13,21 @@ function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
 }
 
-// On-screen twin-stick style controls for touch devices, writing directly
-// into the shared `controls` object from src/controls.js (same object
-// Player.jsx reads from every frame). Nothing here touches React state so a
-// drag/pinch never triggers a re-render.
+// On-screen controls for touch devices, writing directly into the shared
+// `controls` object from src/controls.js (same object Player.jsx reads from
+// every frame). Nothing here touches React state so a drag/pinch never
+// triggers a re-render.
 export default function TouchControls({ controls }) {
   const baseRef = useRef(null);
   const knobRef = useRef(null);
   const stickPointerId = useRef(null);
 
-  const lookRef = useRef(null);
-  const lookPointers = useRef(new Map()); // pointerId -> {x, y}
-  const pinchDist = useRef(null);
+  const surfaceRef = useRef(null);
+  const reticleRef = useRef(null);
+  const pointers = useRef(new Map()); // pointerId -> {x, y}
+  const fireId = useRef(null); // pointerId currently aiming/firing (solo touch)
+  const pinchDist = useRef(null); // baseline distance while 2 fingers are down
+  const pinchMid = useRef(null); // baseline midpoint while 2 fingers are down
 
   // --- movement joystick ---------------------------------------------------
   useEffect(() => {
@@ -91,51 +94,127 @@ export default function TouchControls({ controls }) {
     };
   }, [controls]);
 
-  // --- look area: single-finger drag orbits, two-finger pinch zooms -------
+  // --- fire/look surface -----------------------------------------------------
+  // One finger: aim + fire at the touch point (follows the finger while
+  // held), mirroring desktop's hold-left-click-at-cursor.
+  // Two fingers: camera orbit (average drag) + pinch zoom (distance delta);
+  // firing is suspended while a second finger is down.
   useEffect(() => {
-    const el = lookRef.current;
+    const el = surfaceRef.current;
+    const reticle = reticleRef.current;
     if (!el) return;
 
-    const twoFingerDist = () => {
-      const pts = [...lookPointers.current.values()];
+    const ndcOf = (x, y) => {
+      const r = el.getBoundingClientRect();
+      return {
+        x: ((x - r.left) / r.width) * 2 - 1,
+        y: -((y - r.top) / r.height) * 2 + 1,
+      };
+    };
+    const showReticle = (x, y) => {
+      if (!reticle) return;
+      reticle.style.transform = `translate(${x}px, ${y}px)`;
+      reticle.style.opacity = "1";
+    };
+    const hideReticle = () => {
+      if (reticle) reticle.style.opacity = "0";
+    };
+
+    const startFiring = (id, x, y) => {
+      fireId.current = id;
+      const ndc = ndcOf(x, y);
+      controls.aim.x = ndc.x;
+      controls.aim.y = ndc.y;
+      controls.firing = true;
+      showReticle(x, y);
+    };
+    const stopFiring = () => {
+      fireId.current = null;
+      controls.firing = false;
+      hideReticle();
+    };
+
+    const midAndDist = () => {
+      const pts = [...pointers.current.values()];
       if (pts.length < 2) return null;
-      return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const [a, b] = pts;
+      return {
+        mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+        dist: Math.hypot(a.x - b.x, a.y - b.y),
+      };
     };
 
     const onDown = (e) => {
       el.setPointerCapture(e.pointerId);
-      lookPointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      pinchDist.current = twoFingerDist();
-    };
-    const onMove = (e) => {
-      const pt = lookPointers.current.get(e.pointerId);
-      if (!pt) return;
+      pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-      if (lookPointers.current.size >= 2) {
-        pt.x = e.clientX;
-        pt.y = e.clientY;
-        const dist = twoFingerDist();
-        if (pinchDist.current && dist) {
+      if (pointers.current.size === 1) {
+        startFiring(e.pointerId, e.clientX, e.clientY);
+      } else {
+        // second finger arrived: hand off from single-finger firing to
+        // two-finger look/zoom.
+        if (fireId.current !== null) stopFiring();
+        const md = midAndDist();
+        pinchMid.current = md.mid;
+        pinchDist.current = md.dist;
+      }
+    };
+
+    const onMove = (e) => {
+      const pt = pointers.current.get(e.pointerId);
+      if (!pt) return;
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+
+      if (pointers.current.size >= 2) {
+        const md = midAndDist();
+        if (!md) return;
+        if (pinchMid.current) {
+          const dx = md.mid.x - pinchMid.current.x;
+          const dy = md.mid.y - pinchMid.current.y;
+          controls.yaw -= dx * MOUSE_SENS;
+          controls.pitch = clamp(controls.pitch + dy * MOUSE_SENS, PITCH_MIN, PITCH_MAX);
+        }
+        if (pinchDist.current && md.dist) {
           controls.camDistTarget = clamp(
-            controls.camDistTarget * (pinchDist.current / dist),
+            controls.camDistTarget * (pinchDist.current / md.dist),
             CAM_DIST_MIN,
             CAM_DIST_MAX,
           );
         }
-        pinchDist.current = dist;
+        pinchMid.current = md.mid;
+        pinchDist.current = md.dist;
         return;
       }
 
-      const dx = e.clientX - pt.x;
-      const dy = e.clientY - pt.y;
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      controls.yaw -= dx * MOUSE_SENS;
-      controls.pitch = clamp(controls.pitch + dy * MOUSE_SENS, PITCH_MIN, PITCH_MAX);
+      if (e.pointerId === fireId.current) {
+        const ndc = ndcOf(e.clientX, e.clientY);
+        controls.aim.x = ndc.x;
+        controls.aim.y = ndc.y;
+        showReticle(e.clientX, e.clientY);
+      }
     };
+
     const onUp = (e) => {
-      lookPointers.current.delete(e.pointerId);
-      pinchDist.current = lookPointers.current.size >= 2 ? twoFingerDist() : null;
+      pointers.current.delete(e.pointerId);
+
+      if (e.pointerId === fireId.current) stopFiring();
+
+      if (pointers.current.size >= 2) {
+        const md = midAndDist();
+        pinchMid.current = md.mid;
+        pinchDist.current = md.dist;
+      } else if (pointers.current.size === 1) {
+        // dropped from two fingers to one: resume firing with the finger
+        // that's still down.
+        pinchMid.current = null;
+        pinchDist.current = null;
+        const [[id, pt]] = pointers.current;
+        startFiring(id, pt.x, pt.y);
+      } else {
+        pinchMid.current = null;
+        pinchDist.current = null;
+      }
     };
 
     el.addEventListener("pointerdown", onDown);
@@ -150,17 +229,6 @@ export default function TouchControls({ controls }) {
     };
   }, [controls]);
 
-  // --- fire / jump buttons ---------------------------------------------------
-  const onFireDown = (e) => {
-    e.preventDefault();
-    controls.aim.x = 0;
-    controls.aim.y = 0;
-    controls.firing = true;
-  };
-  const onFireUp = (e) => {
-    e.preventDefault();
-    controls.firing = false;
-  };
   const onJumpDown = (e) => {
     e.preventDefault();
     controls.jump = true;
@@ -172,9 +240,8 @@ export default function TouchControls({ controls }) {
 
   return (
     <div className="touch-controls">
-      <div className="touch-controls__reticle" aria-hidden="true" />
-
-      <div className="touch-controls__look" ref={lookRef} />
+      <div className="touch-controls__surface" ref={surfaceRef} />
+      <div className="touch-controls__reticle" ref={reticleRef} aria-hidden="true" />
 
       <div className="touch-controls__joystick" ref={baseRef}>
         <div className="touch-controls__knob" ref={knobRef} />
@@ -189,15 +256,6 @@ export default function TouchControls({ controls }) {
           onPointerCancel={onJumpUp}
         >
           Jump
-        </button>
-        <button
-          type="button"
-          className="touch-controls__btn touch-controls__btn--fire"
-          onPointerDown={onFireDown}
-          onPointerUp={onFireUp}
-          onPointerCancel={onFireUp}
-        >
-          Fire
         </button>
       </div>
     </div>

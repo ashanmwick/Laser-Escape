@@ -137,8 +137,9 @@ export default function App() {
       <div className="hud">
         {isTouch ? (
           <>
-            <b>Left stick</b> move &nbsp;·&nbsp; <b>Drag</b> look &nbsp;·&nbsp;{" "}
-            <b>Pinch</b> zoom &nbsp;·&nbsp; <b>Fire</b> / <b>Jump</b> buttons
+            <b>Left stick</b> move &nbsp;·&nbsp; <b>Touch &amp; hold</b> fire at that spot
+            &nbsp;·&nbsp; <b>2-finger drag</b> look &nbsp;·&nbsp; <b>Pinch</b> zoom
+            &nbsp;·&nbsp; <b>Jump</b> button
           </>
         ) : (
           <>

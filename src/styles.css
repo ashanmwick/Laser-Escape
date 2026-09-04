@@ -44,7 +44,7 @@ canvas {
   pointer-events: none;
 }
 
-.touch-controls__look {
+.touch-controls__surface {
   position: absolute;
   inset: 0;
   touch-action: none;
@@ -53,15 +53,18 @@ canvas {
 
 .touch-controls__reticle {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 8px;
-  margin: -4px 0 0 -4px;
+  top: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
   border-radius: 50%;
-  background: rgba(255, 45, 85, 0.85);
-  box-shadow: 0 0 4px rgba(255, 45, 85, 0.9);
+  border: 2px solid rgba(255, 45, 85, 0.9);
+  box-shadow: 0 0 6px rgba(255, 45, 85, 0.8);
+  opacity: 0;
   pointer-events: none;
+  will-change: transform, opacity;
+  transition: opacity 80ms linear;
 }
 
 .touch-controls__joystick {
@@ -111,13 +114,6 @@ canvas {
   letter-spacing: 0.04em;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
-}
-
-.touch-controls__btn--fire {
-  width: clamp(76px, 18vmin, 110px);
-  height: clamp(76px, 18vmin, 110px);
-  border-radius: 50%;
-  background: rgba(255, 45, 85, 0.35);
 }
 
 .touch-controls__btn--jump {
