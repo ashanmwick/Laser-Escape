@@ -110,6 +110,7 @@ export default function Player({
   onTargetHit,
   controls,
   wallHealth,
+  laserPower = 1,
 }) {
   const body = useRef(null); // RapierRigidBody
   const rig = useRef(null); // group holding the model, snapped to the capsule
@@ -413,11 +414,14 @@ export default function Player({
         const { wallType, strength } = hitWall.userData;
         const entry = wallHealth.get(wallType);
         if (entry && entry.hp > 0) {
-          entry.hp = Math.max(0, entry.hp - damagePerSecond(strength) * dt);
+          entry.hp = Math.max(
+            0,
+            entry.hp - damagePerSecond(strength, laserPower) * dt,
+          );
         }
       }
     },
-    [camera, raycaster, tmp, world, rapier, collect, onTargetHit, wallHealth],
+    [camera, raycaster, tmp, world, rapier, collect, onTargetHit, wallHealth, laserPower],
   );
 
   // Left button held -> keep firing; release -> let the beam fade.

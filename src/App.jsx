@@ -7,6 +7,7 @@ import Player from "./components/Player.jsx";
 import TouchControls from "./components/TouchControls.jsx";
 import PortraitOverlay from "./components/PortraitOverlay.jsx";
 import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
+import usePlayerProgression from "./hooks/usePlayerProgression.js";
 import { createControlsState } from "./controls.js";
 
 class ErrBoundary extends Component {
@@ -77,6 +78,7 @@ export default function App() {
   const [hits, setHits] = useState(() => new Set());
   const controls = useMemo(() => createControlsState(), []);
   const isTouch = useIsTouchDevice();
+  const progression = usePlayerProgression();
 
   // Per-frame wall HP lives in a plain mutable Map (written every frame by
   // Player's laser raycast, read every frame by each Wall's damage visuals)
@@ -146,6 +148,7 @@ export default function App() {
                 onTargetHit={handleTargetHit}
                 controls={controls}
                 wallHealth={wallHealth}
+                laserPower={progression.stats.power}
               />
             </Physics>
           </Suspense>

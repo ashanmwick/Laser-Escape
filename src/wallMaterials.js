@@ -16,11 +16,8 @@ export const WALL_NAMES = Object.keys(WALL_STRENGTH);
 
 export const WALL_MAX_HEALTH = 100;
 
-// Placeholder: will later scale with game progression — not implemented yet.
-export const LASER_POWER = 50;
-
-// HP/sec = LASER_POWER / strength. Paper melts in ~2s, brick takes ~3min
-// at these defaults — both constants above are the tuning knobs.
-export function damagePerSecond(strength) {
-  return LASER_POWER / strength;
+// HP/sec = power / strength. `power` is the player's live Power stat
+// (src/playerProgression.js), starting at 1 and growing with progression.
+export function damagePerSecond(strength, power) {
+  return power / strength;
 }
