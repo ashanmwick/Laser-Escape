@@ -1,7 +1,7 @@
 import { useRef, useMemo, useEffect, useCallback } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useGLTF } from "@react-three/drei";
-import { RigidBody, CapsuleCollider, useRapier } from "@react-three/rapier";
+import { RigidBody, CapsuleCollider, useRapier, interactionGroups } from "@react-three/rapier";
 import * as THREE from "three";
 import {
   CAM_DIST_DEFAULT,
@@ -11,6 +11,8 @@ import {
   PITCH_MIN,
   PITCH_MAX,
 } from "../controls.js";
+import { damagePerSecond } from "../wallMaterials.js";
+import { GROUP_PLAYER, PLAYER_FILTER } from "../collisionGroups.js";
 
 /**
  * Third-person physics player for "Laser Escape".
@@ -48,6 +50,7 @@ const CAPSULE_HALF_HEIGHT = 0.6; // cylinder half-height (~1.8 total)
 const FOOT_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // centre -> feet
 
 const MODEL_TARGET_HEIGHT = 1.7; // normalize the glb to this many metres
+const PLAYER_SCALE = 2.1; // extra shrink applied on top of the height-normalized fit
 // Loose sanity clamp on the normalised scale: only there to stop a degenerate
 // measurement from filling the screen or vanishing. player.glb needs ~0.27x;
 // a conventionally-scaled glb would be ~1x -- both sit comfortably inside.
@@ -102,7 +105,12 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
-export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, controls }) {
+export default function Player({
+  spawnPosition = [0, 2, 0],
+  onTargetHit,
+  controls,
+  wallHealth,
+}) {
   const body = useRef(null); // RapierRigidBody
   const rig = useRef(null); // group holding the model, snapped to the capsule
   const beam = useRef(null); // reused world-space beam mesh
@@ -144,11 +152,12 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
     if (box.isEmpty()) return { scale: 1, y: -FOOT_OFFSET };
     const size = box.getSize(new THREE.Vector3());
     const raw = MODEL_TARGET_HEIGHT / (size.y || 1);
-    const s = THREE.MathUtils.clamp(
-      Number.isFinite(raw) ? raw : 1,
-      MODEL_SCALE_MIN,
-      MODEL_SCALE_MAX,
-    );
+    const s =
+      THREE.MathUtils.clamp(
+        Number.isFinite(raw) ? raw : 1,
+        MODEL_SCALE_MIN,
+        MODEL_SCALE_MAX,
+      ) * PLAYER_SCALE;
     if (
       import.meta.env.DEV &&
       (!Number.isFinite(raw) || raw < MODEL_SCALE_MIN || raw > MODEL_SCALE_MAX)
@@ -196,6 +205,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
   const orbiting = useRef(false); // right mouse button held
 
   const targets = useRef([]);
+  const walls = useRef([]);
   const heldHitId = useRef(null); // target currently under the held beam
   const beamState = useRef({
     held: false,
@@ -313,10 +323,13 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
   // --- target array from userData tags ------------------------------------
   const collect = useCallback(() => {
     const t = [];
+    const w = [];
     scene.traverse((o) => {
       if (o.userData?.isTarget) t.push(o);
+      else if (o.userData?.isWall) w.push(o);
     });
     targets.current = t;
+    walls.current = w;
   }, [scene]);
   useEffect(() => {
     collect();
@@ -335,7 +348,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
   // writing beamState.from/to. When `trigger`, notify a target the first
   // frame the beam lands on it (re-notifies if it sweeps onto a new one).
   const castBeam = useCallback(
-    (ndcX, ndcY, trigger) => {
+    (ndcX, ndcY, trigger, dt) => {
       const rb = body.current;
       if (!rb) return;
 
@@ -346,6 +359,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
       collect();
 
       const tHit = raycaster.intersectObjects(targets.current, true)[0];
+      const wMeshHit = raycaster.intersectObjects(walls.current, true)[0];
 
       const rray = new rapier.Ray(origin, tmp.dir);
       const wHit = world.castRay(
@@ -359,11 +373,20 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
       );
       const wallToi = wHit ? wHit.timeOfImpact : Infinity;
 
+      // The wall mesh raycast should land ~on top of the physics wallToi when
+      // the beam is genuinely striking that wall's surface (it's the same
+      // geometry); a small epsilon absorbs mesh-vs-collider fitting error.
+      const wallHitValid = wMeshHit && wMeshHit.distance <= wallToi + 0.05;
+
       const to = beamState.current.to;
       let hitTarget = null;
+      let hitWall = null;
       if (tHit && tHit.distance <= wallToi) {
         to.copy(tHit.point);
         hitTarget = resolveTarget(tHit.object);
+      } else if (wallHitValid) {
+        to.copy(wMeshHit.point);
+        hitWall = wMeshHit.object;
       } else if (wHit) {
         to.copy(origin).addScaledVector(tmp.dir, wallToi);
       } else {
@@ -385,8 +408,16 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
         onTargetHit?.(id);
       }
       if (trigger) heldHitId.current = id;
+
+      if (trigger && hitWall && dt && wallHealth) {
+        const { wallType, strength } = hitWall.userData;
+        const entry = wallHealth.get(wallType);
+        if (entry && entry.hp > 0) {
+          entry.hp = Math.max(0, entry.hp - damagePerSecond(strength) * dt);
+        }
+      }
     },
-    [camera, raycaster, tmp, world, rapier, collect, onTargetHit],
+    [camera, raycaster, tmp, world, rapier, collect, onTargetHit, wallHealth],
   );
 
   // Left button held -> keep firing; release -> let the beam fade.
@@ -577,7 +608,7 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
         mesh.visible = true;
       };
       if (controls.firing) {
-        castBeam(controls.aim.x, controls.aim.y, true);
+        castBeam(controls.aim.x, controls.aim.y, true, step);
         drawBeam(0.8 + 0.2 * Math.sin(performance.now() * 0.05)); // hum
       } else if (bs.releaseT0) {
         const age = performance.now() - bs.releaseT0;
@@ -608,7 +639,10 @@ export default function Player({ spawnPosition = [0, 2, 0], onTargetHit, control
         linearDamping={0}
         canSleep={false}
       >
-        <CapsuleCollider args={[CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS]} />
+        <CapsuleCollider
+          args={[CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS]}
+          collisionGroups={interactionGroups(GROUP_PLAYER, PLAYER_FILTER)}
+        />
       </RigidBody>
 
       {/* visible character, snapped to the capsule every frame */}

@@ -78,11 +78,27 @@ export default function App() {
   const controls = useMemo(() => createControlsState(), []);
   const isTouch = useIsTouchDevice();
 
+  // Per-frame wall HP lives in a plain mutable Map (written every frame by
+  // Player's laser raycast, read every frame by each Wall's damage visuals)
+  // -- same pattern as controls.js, kept out of React state to avoid
+  // re-rendering on every tick of damage.
+  const wallHealth = useMemo(() => new Map(), []);
+  const [destroyedWalls, setDestroyedWalls] = useState(() => new Set());
+
   const handleTargetHit = useCallback((id) => {
     setHits((prev) => {
       if (prev.has(id)) return prev;
       const next = new Set(prev);
       next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleWallDestroyed = useCallback((wallType) => {
+    setDestroyedWalls((prev) => {
+      if (prev.has(wallType)) return prev;
+      const next = new Set(prev);
+      next.add(wallType);
       return next;
     });
   }, []);
@@ -111,7 +127,11 @@ export default function App() {
         <ErrBoundary>
           <Suspense fallback={null}>
             <Physics>
-              <World />
+              <World
+                wallHealth={wallHealth}
+                destroyedWalls={destroyedWalls}
+                onWallDestroyed={handleWallDestroyed}
+              />
               {TARGETS.map((t) => (
                 <Target
                   key={t.id}
@@ -125,6 +145,7 @@ export default function App() {
                 spawnPosition={[0, 2, 2]}
                 onTargetHit={handleTargetHit}
                 controls={controls}
+                wallHealth={wallHealth}
               />
             </Physics>
           </Suspense>
