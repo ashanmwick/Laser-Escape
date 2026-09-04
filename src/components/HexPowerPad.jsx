@@ -3,6 +3,7 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import * as THREE from "three";
 import { formatCompactNumber } from "../formatNumber.js";
+import { labelBarStyle, labelRequirementStyle, labelColumnStyle } from "./labelStyles.js";
 import {
   HEX_PAD_NAMES,
   HEX_PAD_TIERS,
@@ -12,28 +13,6 @@ import {
   HEX_PAD_COLOR_OWNED,
   HEX_PAD_COLOR_EQUIPPED,
 } from "../hexPowerPads.js";
-
-const barStyle = {
-  padding: "2px 10px",
-  borderRadius: 4,
-  background: "#c8102e",
-  border: "1px solid rgba(0,0,0,0.7)",
-  color: "#fff",
-  fontWeight: 700,
-  fontSize: 28,
-  whiteSpace: "nowrap",
-  textShadow:
-    "-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000",
-};
-
-const winsStyle = {
-  color: "#ffd400",
-  fontWeight: 700,
-  fontSize: 28,
-  whiteSpace: "nowrap",
-  textShadow:
-    "-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000",
-};
 
 /**
  * One buyable/equippable hex power pad (World.jsx tags the meshes, the pad
@@ -91,18 +70,12 @@ export default function HexPowerPad({ mesh, state }) {
 
   return (
     <Html position={labelPos} center distanceFactor={HEX_PAD_LABEL_DISTANCE_FACTOR}>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 3,
-          pointerEvents: "none",
-        }}
-      >
+      <div style={labelColumnStyle}>
         <img src="/action-popup.png" alt="" style={{ width: 28, height: 28 }} />
-        <div style={barStyle}>+{formatCompactNumber(tier.power)} Power</div>
-        <div style={winsStyle}>{formatCompactNumber(tier.winsRequired)} Wins Required</div>
+        <div style={labelBarStyle}>+{formatCompactNumber(tier.power)} Power</div>
+        <div style={labelRequirementStyle}>
+          {formatCompactNumber(tier.winsRequired)} Wins Required
+        </div>
       </div>
     </Html>
   );

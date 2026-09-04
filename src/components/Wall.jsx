@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import { RigidBody } from "@react-three/rapier";
@@ -30,6 +30,17 @@ export default function Wall({
   const pctRef = useRef(null);
   const overlayRef = useRef(null);
   const notifiedRef = useRef(false);
+
+  // `destroyed` flips back to false when a win floor panel resets the run
+  // (App.jsx's handleWinPanelHit clears destroyedWalls + restores HP) --
+  // this component stays mounted across that (same `key={wallType}` in
+  // World.jsx), so without this, notifiedRef would stay latched from the
+  // first break and the useFrame check below would never fire onDestroyed
+  // again, leaving the wall stuck at 0 HP/max damage decal forever instead
+  // of actually breaking on a second run.
+  useEffect(() => {
+    if (!destroyed) notifiedRef.current = false;
+  }, [destroyed]);
 
   // Occlude the health bar against the rest of the level (terrain, crates,
   // trees...) and every *other* still-standing wall -- but NOT this wall's

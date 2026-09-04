@@ -11,6 +11,7 @@ import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
 import usePlayerProgression from "./hooks/usePlayerProgression.js";
 import { createControlsState } from "./controls.js";
 import { HEX_PAD_NAMES, HEX_PAD_TIERS } from "./hexPowerPads.js";
+import { AFK_REBIRTH_REQUIRED } from "./afkTargets.js";
 import { formatCompactNumber } from "./formatNumber.js";
 
 class ErrBoundary extends Component {
@@ -115,10 +116,27 @@ export default function App() {
     });
   }, []);
 
-  const handleAction = useCallback(() => {
-    progression.registerAction();
-    popupsRef.current?.spawn();
-  }, [progression.registerAction]);
+  const handleAction = useCallback(
+    (multiplier) => {
+      progression.registerAction(multiplier);
+      popupsRef.current?.spawn();
+    },
+    [progression.registerAction],
+  );
+
+  // Win floor panels (src/winPanels.js): Player.jsx already teleported the
+  // capsule back to spawn by the time this fires -- here we only touch the
+  // state App.jsx owns: credit the panel's Wins (progression is otherwise
+  // untouched) and restore every wall to undestroyed/full HP for the next
+  // run.
+  const handleWinPanelHit = useCallback(
+    (_name, wins) => {
+      progression.addWins(wins);
+      for (const entry of wallHealth.values()) entry.hp = entry.maxHp;
+      setDestroyedWalls((prev) => (prev.size === 0 ? prev : new Set()));
+    },
+    [progression.addWins, wallHealth],
+  );
 
   const handleAfkNearChange = useCallback((name) => setNearAfkTarget(name), []);
   const handleAfkActiveChange = useCallback((active) => setAfkActive(active), []);
@@ -197,9 +215,11 @@ export default function App() {
                 onAfkActiveChange={handleAfkActiveChange}
                 onNearHexPadChange={handleNearHexPadChange}
                 onHexPadInteract={handleHexPadInteract}
+                onWinPanelHit={handleWinPanelHit}
                 controls={controls}
                 wallHealth={wallHealth}
                 laserPower={progression.stats.power}
+                rebirth={progression.stats.rebirth}
               />
             </Physics>
           </Suspense>
@@ -213,8 +233,13 @@ export default function App() {
       {(() => {
         let prompt = null;
         if (afkActive) prompt = "AFK'ing — move or press Space to stop";
-        else if (nearAfkTarget) prompt = "Press E to AFK Here";
-        else if (nearHexPad && nearHexPad !== equippedPad) {
+        else if (nearAfkTarget) {
+          const required = AFK_REBIRTH_REQUIRED[nearAfkTarget] ?? 0;
+          prompt =
+            progression.stats.rebirth >= required
+              ? "Press E to AFK Here"
+              : `Requires Rebirth ${required}`;
+        } else if (nearHexPad && nearHexPad !== equippedPad) {
           prompt = boughtPads.has(nearHexPad)
             ? "Press E to Equip Laser"
             : "Press E to Buy Laser";

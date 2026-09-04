@@ -4,9 +4,12 @@ import { RigidBody } from "@react-three/rapier";
 import * as THREE from "three";
 import Wall from "./Wall.jsx";
 import HexPowerPad from "./HexPowerPad.jsx";
+import AfkTargetLabel from "./AfkTargetLabel.jsx";
+import WinPanelLabel from "./WinPanelLabel.jsx";
 import { WALL_NAMES, WALL_STRENGTH, WALL_MAX_HEALTH } from "../wallMaterials.js";
 import { AFK_TARGET_NAMES } from "../afkTargets.js";
 import { HEX_PAD_NAMES } from "../hexPowerPads.js";
+import { WIN_PANEL_NAMES, WIN_PANEL_WINS } from "../winPanels.js";
 
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
@@ -57,16 +60,20 @@ export default function World({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene]);
 
-  // Tag AFK auto-fire targets (src/afkTargets.js) so Player.jsx's proximity
-  // scan can find them. Runs as a useMemo (during render, before any
-  // effects) rather than an effect, so the tags are guaranteed to exist by
-  // the time Player.jsx's mount effect gathers them.
-  useMemo(() => {
+  // Tag + collect AFK auto-fire targets (src/afkTargets.js): tagging is for
+  // Player.jsx's proximity scan (runs as a useMemo, during render, before
+  // any effects, so the tags are guaranteed to exist by the time Player.jsx's
+  // mount effect gathers them); the mesh list is also kept so each target
+  // can get its own <AfkTargetLabel> (floating power/rebirth info) below.
+  const afkTargetMeshes = useMemo(() => {
+    const found = [];
     scene.traverse((o) => {
       if (o.isMesh && AFK_TARGET_NAMES.includes(o.name)) {
         o.userData.isAfkTarget = true;
+        found.push(o);
       }
     });
+    return found;
   }, [scene]);
 
   // Tag + collect hex power pads (src/hexPowerPads.js): tagging (for
@@ -79,6 +86,23 @@ export default function World({
     scene.traverse((o) => {
       if (o.isMesh && HEX_PAD_NAMES.includes(o.name)) {
         o.userData.isHexPad = true;
+        found.push(o);
+      }
+    });
+    return found;
+  }, [scene]);
+
+  // Tag + collect win floor panels (src/winPanels.js): tagging is for
+  // Player.jsx's per-frame proximity/"collision" check, same as AFK targets
+  // and hex pads above; the mesh list also drives each panel's own
+  // <WinPanelLabel> (floating Wins-value tag) below.
+  const winPanels = useMemo(() => {
+    const found = [];
+    scene.traverse((o) => {
+      const idx = WIN_PANEL_NAMES.indexOf(o.name);
+      if (o.isMesh && idx !== -1) {
+        o.userData.isWinPanel = true;
+        o.userData.winPanelWins = WIN_PANEL_WINS[idx];
         found.push(o);
       }
     });
@@ -125,6 +149,12 @@ export default function World({
                 : "locked"
           }
         />
+      ))}
+      {afkTargetMeshes.map((mesh) => (
+        <AfkTargetLabel key={mesh.name} mesh={mesh} />
+      ))}
+      {winPanels.map((mesh) => (
+        <WinPanelLabel key={mesh.name} mesh={mesh} wins={mesh.userData.winPanelWins} />
       ))}
     </>
   );

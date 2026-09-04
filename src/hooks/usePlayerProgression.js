@@ -15,7 +15,9 @@ import {
  *
  * `registerAction` is the single entry point for Power gain: call it once
  * per Action (a click, or each full 2s of continuous laser hold -- see
- * Player.jsx). It applies `powerPerAction * (rebirth + 1)` and re-derives
+ * Player.jsx). It applies `powerPerAction * (rebirth + 1) * multiplier`
+ * (multiplier defaults to 1; AFK auto-fire at certain targets passes a
+ * higher one -- see src/afkTargets.js's AFK_POWER_MULTIPLIER) and re-derives
  * Level from the resulting Power in the same update, so the two stats never
  * go out of sync.
  *
@@ -28,9 +30,9 @@ import {
 export default function usePlayerProgression() {
   const [stats, setStats] = useState(PROGRESSION_INITIAL);
 
-  const registerAction = useCallback(() => {
+  const registerAction = useCallback((multiplier = 1) => {
     setStats((prev) => {
-      const gain = prev.powerPerAction * (prev.rebirth + 1);
+      const gain = prev.powerPerAction * (prev.rebirth + 1) * multiplier;
       const power = clampStat("power", prev.power + gain);
       const level = levelForPower(power);
       if (power === prev.power && level === prev.level) return prev;

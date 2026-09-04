@@ -14,8 +14,14 @@ import {
 import { damagePerSecond } from "../wallMaterials.js";
 import { ACTION_HOLD_SECONDS } from "../playerProgression.js";
 import { GROUP_PLAYER, PLAYER_FILTER } from "../collisionGroups.js";
-import { AFK_AIM_OFFSET, AFK_PROXIMITY_RADIUS } from "../afkTargets.js";
+import {
+  AFK_AIM_OFFSET,
+  AFK_PROXIMITY_RADIUS,
+  AFK_REBIRTH_REQUIRED,
+  AFK_POWER_MULTIPLIER,
+} from "../afkTargets.js";
 import { HEX_PAD_NAMES, HEX_PAD_PROXIMITY_RADIUS } from "../hexPowerPads.js";
+import { WIN_PANEL_TRIGGER_RADIUS } from "../winPanels.js";
 
 /**
  * Third-person physics player for "Laser Escape".
@@ -24,6 +30,12 @@ import { HEX_PAD_NAMES, HEX_PAD_PROXIMITY_RADIUS } from "../hexPowerPads.js";
  * (public/player.glb). It is driven by an invisible dynamic capsule:
  * physics moves the capsule, the model is snapped to it each frame and
  * yawed toward the movement direction.
+ *
+ * Walking onto a tagged win floor panel (src/winPanels.js) reports
+ * `onWinPanelHit(name, wins)` and immediately teleports the capsule back to
+ * `spawnPosition` with velocity zeroed -- App.jsx credits the panel's Wins
+ * value and resets wall damage/destruction, while Power/Level/Rebirth/Wins
+ * themselves are untouched (this component never resets progression).
  *
  * Controls:
  *  - WASD / arrows  move (relative to the camera), Space jumps
@@ -121,9 +133,11 @@ export default function Player({
   onAfkActiveChange,
   onNearHexPadChange,
   onHexPadInteract,
+  onWinPanelHit,
   controls,
   wallHealth,
   laserPower = 1,
+  rebirth = 0,
 }) {
   const body = useRef(null); // RapierRigidBody
   const rig = useRef(null); // group holding the model, snapped to the capsule
@@ -236,11 +250,15 @@ export default function Player({
   // movement key or jump cancels it. afkTargetsList is gathered once on
   // mount (the targets are static world geometry); nearAfkTarget/afkActive
   // are edge-tracked and only reported upward (onAfkNearChange/
-  // onAfkActiveChange) when they change.
+  // onAfkActiveChange) when they change. Starting is gated on
+  // `rebirth >= AFK_REBIRTH_REQUIRED[target]`; while active, afkMultiplier
+  // holds that target's AFK_POWER_MULTIPLIER, applied on top of the normal
+  // Action gain (see the "Action tracking" block below).
   const afkTargetsList = useRef([]); // [{ name, aimPoint: THREE.Vector3 }]
   const nearAfkTarget = useRef(null); // name string | null
   const afkActive = useRef(false);
   const afkAimPoint = useRef(new THREE.Vector3());
+  const afkMultiplier = useRef(1);
   const afkNdc = useRef(new THREE.Vector3());
 
   // Hex power pad shop (src/hexPowerPads.js): press E near one to buy/equip
@@ -248,6 +266,12 @@ export default function Player({
   // component only reports proximity and the raw interaction intent.
   const hexPadsList = useRef([]); // [{ name, position: THREE.Vector3 }]
   const nearHexPad = useRef(null); // name string | null
+
+  // Win floor panels (src/winPanels.js): gathered once like AFK targets/hex
+  // pads above (static world geometry). Triggering uses the same
+  // nearest-in-range scan as those (WIN_PANEL_TRIGGER_RADIUS), not a strict
+  // on-the-mesh collision -- getting close is enough.
+  const winPanelsList = useRef([]); // [{ name, x, z, wins }]
 
   const beamState = useRef({
     held: false,
@@ -342,8 +366,10 @@ export default function Player({
         (t) => t.name === nearAfkTarget.current,
       );
       if (!target) return;
+      if (rebirth < (AFK_REBIRTH_REQUIRED[target.name] ?? 0)) return; // not eligible yet
       afkActive.current = true;
       afkAimPoint.current.copy(target.aimPoint);
+      afkMultiplier.current = AFK_POWER_MULTIPLIER[target.name] ?? 1;
       controls.firing = true;
       beamState.current.held = true;
       heldHitId.current = null;
@@ -351,7 +377,7 @@ export default function Player({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [controls, stopAfk, onAfkActiveChange, onHexPadInteract]);
+  }, [controls, stopAfk, onAfkActiveChange, onHexPadInteract, rebirth]);
 
   // --- camera orbit (right-drag) + zoom (wheel), cursor stays visible ------
   useEffect(() => {
@@ -455,6 +481,25 @@ export default function Player({
       found.push({ name: o.name, position: o.getWorldPosition(new THREE.Vector3()) });
     });
     hexPadsList.current = found;
+  }, [scene]);
+
+  // Gather win floor panels (userData.isWinPanel, tagged by World.jsx) once
+  // -- also static world geometry.
+  useEffect(() => {
+    const found = [];
+    const box = new THREE.Box3();
+    scene.traverse((o) => {
+      if (!o.userData?.isWinPanel) return;
+      box.setFromObject(o);
+      if (box.isEmpty()) return;
+      found.push({
+        name: o.name,
+        x: (box.min.x + box.max.x) / 2,
+        z: (box.min.z + box.max.z) / 2,
+        wins: o.userData.winPanelWins ?? 0,
+      });
+    });
+    winPanelsList.current = found;
   }, [scene]);
 
   const resolveTarget = (obj) => {
@@ -598,6 +643,35 @@ export default function Player({
     const t = rb.translation();
     tmp.pos.set(t.x, t.y, t.z);
 
+    // Win floor panels (src/winPanels.js): getting within
+    // WIN_PANEL_TRIGGER_RADIUS of one ends the run -- teleport back to
+    // spawn (velocity zeroed) and report the hit upward (App.jsx credits
+    // Wins + resets wall damage). Nearest-in-range, same scan style as the
+    // AFK targets/hex pads above. tmp.pos is corrected in place so the
+    // camera/animation code below this frame already sees the
+    // post-respawn position instead of snapping visibly next frame.
+    let hitPanel = null;
+    let hitPanelDistSq = WIN_PANEL_TRIGGER_RADIUS * WIN_PANEL_TRIGGER_RADIUS;
+    for (const panel of winPanelsList.current) {
+      const dx = tmp.pos.x - panel.x;
+      const dz = tmp.pos.z - panel.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < hitPanelDistSq) {
+        hitPanelDistSq = dSq;
+        hitPanel = panel;
+      }
+    }
+    if (hitPanel) {
+      onWinPanelHit?.(hitPanel.name, hitPanel.wins);
+      rb.setTranslation(
+        { x: spawnPosition[0], y: spawnPosition[1], z: spawnPosition[2] },
+        true,
+      );
+      rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      const t2 = rb.translation();
+      tmp.pos.set(t2.x, t2.y, t2.z);
+    }
+
     // Camera basis: forward is where the camera looks, flattened to XZ.
     camDist.current = THREE.MathUtils.damp(
       camDist.current,
@@ -740,6 +814,11 @@ export default function Player({
       onAfkNearChange?.(nearestName);
     }
 
+    // Snapshot before any stop below, so a same-frame stop still credits
+    // the AFK multiplier to the release-triggered click, if any (see the
+    // Action-tracking block).
+    const firingMultiplier = afkActive.current ? afkMultiplier.current : 1;
+
     if (afkActive.current) {
       if (controls.move.x !== 0 || controls.move.z !== 0 || controls.jump) {
         stopAfk();
@@ -779,10 +858,10 @@ export default function Player({
       }
       const heldSec = (nowMs - fireStartMs.current) / 1000;
       const dueTicks = Math.floor(heldSec / ACTION_HOLD_SECONDS);
-      for (let i = holdActionsGranted.current; i < dueTicks; i++) onAction?.();
+      for (let i = holdActionsGranted.current; i < dueTicks; i++) onAction?.(firingMultiplier);
       holdActionsGranted.current = dueTicks;
     } else if (wasFiring.current && holdActionsGranted.current === 0) {
-      onAction?.(); // released before a full hold-tick -> counts as one click
+      onAction?.(firingMultiplier); // released before a full hold-tick -> counts as one click
     }
     wasFiring.current = controls.firing;
 
