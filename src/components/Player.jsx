@@ -12,7 +12,10 @@ import {
   PITCH_MAX,
 } from "../controls.js";
 import { damagePerSecond } from "../wallMaterials.js";
+import { ACTION_HOLD_SECONDS } from "../playerProgression.js";
 import { GROUP_PLAYER, PLAYER_FILTER } from "../collisionGroups.js";
+import { AFK_AIM_OFFSET, AFK_PROXIMITY_RADIUS } from "../afkTargets.js";
+import { HEX_PAD_NAMES, HEX_PAD_PROXIMITY_RADIUS } from "../hexPowerPads.js";
 
 /**
  * Third-person physics player for "Laser Escape".
@@ -28,19 +31,24 @@ import { GROUP_PLAYER, PLAYER_FILTER } from "../collisionGroups.js";
  *  - mouse wheel  zooms the camera in / out
  *  - hold left click  fires a continuous laser at whatever is under the
  *    cursor in 3D (release to let it fade)
+ *  - E, near a tagged AFK target (src/afkTargets.js)  auto-fires at that
+ *    target's aim point hands-free; any movement key or Space cancels it
  * The OS cursor stays visible the whole time (no pointer lock).
  *
  * player.glb has no locomotion clips (only a T-pose), so the walk cycle is
  * generated procedurally: a set of CC-rig bones are rotated each frame by a
  * `gait` factor that eases 0..1 with speed. Idle just drops the arms.
  *
- * The only things that cross the component boundary are `onTargetHit(targetId)`
- * and `controls`, the shared input object from src/controls.js: keyboard/mouse
- * listeners here and the on-screen touch controls (TouchControls.jsx) both
- * write into it, this component only reads it each frame. Targets are meshes
+ * `controls`, the shared input object from src/controls.js, is written by
+ * keyboard/mouse listeners here and the on-screen touch controls
+ * (TouchControls.jsx), and only read here each frame. Targets are meshes
  * tagged `userData.isTarget = true` (optionally `userData.targetId`); the
  * laser mesh-raycasts only that array, and uses a cheap physics ray for the
- * beam's end point on a miss.
+ * beam's end point on a miss. AFK targets are tagged `userData.isAfkTarget`
+ * (World.jsx) instead -- they're not part of the target/gate puzzle, so
+ * hitting one doesn't call `onTargetHit`. Callback props: `onTargetHit`,
+ * `onAction` (one per laser Action -- see src/playerProgression.js),
+ * `onAfkNearChange`/`onAfkActiveChange` (AFK prompt state).
  */
 
 const SPEED = 5;
@@ -108,6 +116,11 @@ function lerpAngle(a, b, t) {
 export default function Player({
   spawnPosition = [0, 2, 0],
   onTargetHit,
+  onAction,
+  onAfkNearChange,
+  onAfkActiveChange,
+  onNearHexPadChange,
+  onHexPadInteract,
   controls,
   wallHealth,
   laserPower = 1,
@@ -208,6 +221,34 @@ export default function Player({
   const targets = useRef([]);
   const walls = useRef([]);
   const heldHitId = useRef(null); // target currently under the held beam
+
+  // Action tracking (src/playerProgression.js): a "click" (fire released
+  // under ACTION_HOLD_SECONDS) or each full ACTION_HOLD_SECONDS of
+  // continuous hold counts as one Action. Driven by edge-detecting
+  // controls.firing in useFrame rather than the pointer handlers below, so
+  // it fires identically whether input came from the mouse or TouchControls.
+  const fireStartMs = useRef(0);
+  const holdActionsGranted = useRef(0);
+  const wasFiring = useRef(false);
+
+  // AFK auto-fire (src/afkTargets.js): press E near a tagged target to
+  // continuously fire at its aim point without holding the mouse. Any
+  // movement key or jump cancels it. afkTargetsList is gathered once on
+  // mount (the targets are static world geometry); nearAfkTarget/afkActive
+  // are edge-tracked and only reported upward (onAfkNearChange/
+  // onAfkActiveChange) when they change.
+  const afkTargetsList = useRef([]); // [{ name, aimPoint: THREE.Vector3 }]
+  const nearAfkTarget = useRef(null); // name string | null
+  const afkActive = useRef(false);
+  const afkAimPoint = useRef(new THREE.Vector3());
+  const afkNdc = useRef(new THREE.Vector3());
+
+  // Hex power pad shop (src/hexPowerPads.js): press E near one to buy/equip
+  // it -- App.jsx owns the bought/equipped state and decides which, this
+  // component only reports proximity and the raw interaction intent.
+  const hexPadsList = useRef([]); // [{ name, position: THREE.Vector3 }]
+  const nearHexPad = useRef(null); // name string | null
+
   const beamState = useRef({
     held: false,
     releaseT0: 0,
@@ -267,6 +308,50 @@ export default function Player({
       window.removeEventListener("blur", clear);
     };
   }, [controls]);
+
+  // Stops AFK auto-fire (see the "AFK auto-fire" useFrame block below and
+  // the KeyE handler right after this) the same way releasing the mouse
+  // does: end firing and let the beam fade.
+  const stopAfk = useCallback(() => {
+    if (!afkActive.current) return;
+    afkActive.current = false;
+    controls.firing = false;
+    beamState.current.held = false;
+    beamState.current.releaseT0 = performance.now();
+    heldHitId.current = null;
+    onAfkActiveChange?.(false);
+  }, [controls, onAfkActiveChange]);
+
+  // KeyE: buy/equip a nearby hex power pad (App.jsx decides which, based on
+  // its own bought/equipped state -- this only reports the raw intent),
+  // else start AFK auto-fire at the nearest in-range target, or stop it if
+  // already active (a manual toggle-off, on top of the movement/jump
+  // cancel below).
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.code !== "KeyE") return;
+      if (nearHexPad.current) {
+        onHexPadInteract?.(nearHexPad.current);
+        return;
+      }
+      if (afkActive.current) {
+        stopAfk();
+        return;
+      }
+      const target = afkTargetsList.current.find(
+        (t) => t.name === nearAfkTarget.current,
+      );
+      if (!target) return;
+      afkActive.current = true;
+      afkAimPoint.current.copy(target.aimPoint);
+      controls.firing = true;
+      beamState.current.held = true;
+      heldHitId.current = null;
+      onAfkActiveChange?.(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [controls, stopAfk, onAfkActiveChange, onHexPadInteract]);
 
   // --- camera orbit (right-drag) + zoom (wheel), cursor stays visible ------
   useEffect(() => {
@@ -335,6 +420,42 @@ export default function Player({
   useEffect(() => {
     collect();
   }, [collect]);
+
+  // Gather AFK targets (userData.isAfkTarget, tagged by World.jsx) once:
+  // they're static world geometry, so there's no need to re-scan every
+  // frame like targets/walls (which can be destroyed/change) do in collect().
+  useEffect(() => {
+    const found = [];
+    const box = new THREE.Box3();
+    const size = new THREE.Vector3();
+    scene.traverse((o) => {
+      if (!o.userData?.isAfkTarget) return;
+      box.setFromObject(o);
+      if (box.isEmpty()) return;
+      box.getSize(size);
+      const offset = AFK_AIM_OFFSET[o.name] ?? [0, 0, 0];
+      const aimPoint = new THREE.Vector3(
+        (box.min.x + box.max.x) / 2 + offset[0],
+        box.max.y + offset[1],
+        (box.min.z + box.max.z) / 2 + offset[2],
+      );
+      found.push({ name: o.name, aimPoint });
+    });
+    afkTargetsList.current = found;
+  }, [scene]);
+
+  // Gather hex power pads (userData.isHexPad, tagged by World.jsx) once --
+  // also static world geometry.
+  useEffect(() => {
+    const found = [];
+    scene.traverse((o) => {
+      if (!o.userData?.isHexPad) return;
+      const idx = HEX_PAD_NAMES.indexOf(o.name);
+      if (idx === -1) return;
+      found.push({ name: o.name, position: o.getWorldPosition(new THREE.Vector3()) });
+    });
+    hexPadsList.current = found;
+  }, [scene]);
 
   const resolveTarget = (obj) => {
     let o = obj;
@@ -596,6 +717,74 @@ export default function Player({
     if (inner.current) {
       inner.current.position.y = fit.y + Math.abs(sw) * 0.04 * g;
     }
+
+    // AFK auto-fire (src/afkTargets.js): find the nearest in-range target
+    // (horizontal distance only, so a tall target's elevated aim point
+    // doesn't inflate the check) and report prompt changes upward. While
+    // active, drive the beam at the locked-in aim point every frame --
+    // this sets controls.firing/aim before the Action-tracking block below
+    // runs, so it's treated exactly like a manual hold.
+    let nearestName = null;
+    let nearestDistSq = AFK_PROXIMITY_RADIUS * AFK_PROXIMITY_RADIUS;
+    for (const entry of afkTargetsList.current) {
+      const dx = tmp.pos.x - entry.aimPoint.x;
+      const dz = tmp.pos.z - entry.aimPoint.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < nearestDistSq) {
+        nearestDistSq = dSq;
+        nearestName = entry.name;
+      }
+    }
+    if (nearestName !== nearAfkTarget.current) {
+      nearAfkTarget.current = nearestName;
+      onAfkNearChange?.(nearestName);
+    }
+
+    if (afkActive.current) {
+      if (controls.move.x !== 0 || controls.move.z !== 0 || controls.jump) {
+        stopAfk();
+      } else {
+        afkNdc.current.copy(afkAimPoint.current).project(camera);
+        controls.aim.x = afkNdc.current.x;
+        controls.aim.y = afkNdc.current.y;
+        controls.firing = true;
+      }
+    }
+
+    // Hex power pad shop (src/hexPowerPads.js): same nearest-in-range scan
+    // as AFK targets above; E buys/equips it (see the keydown handler).
+    let nearestPadName = null;
+    let nearestPadDistSq = HEX_PAD_PROXIMITY_RADIUS * HEX_PAD_PROXIMITY_RADIUS;
+    for (const entry of hexPadsList.current) {
+      const dx = tmp.pos.x - entry.position.x;
+      const dz = tmp.pos.z - entry.position.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < nearestPadDistSq) {
+        nearestPadDistSq = dSq;
+        nearestPadName = entry.name;
+      }
+    }
+    if (nearestPadName !== nearHexPad.current) {
+      nearHexPad.current = nearestPadName;
+      onNearHexPadChange?.(nearestPadName);
+    }
+
+    // Action tracking: a quick click, or each full ACTION_HOLD_SECONDS of
+    // continuous hold, grants one Action (see refs declared above).
+    const nowMs = performance.now();
+    if (controls.firing) {
+      if (!wasFiring.current) {
+        fireStartMs.current = nowMs;
+        holdActionsGranted.current = 0;
+      }
+      const heldSec = (nowMs - fireStartMs.current) / 1000;
+      const dueTicks = Math.floor(heldSec / ACTION_HOLD_SECONDS);
+      for (let i = holdActionsGranted.current; i < dueTicks; i++) onAction?.();
+      holdActionsGranted.current = dueTicks;
+    } else if (wasFiring.current && holdActionsGranted.current === 0) {
+      onAction?.(); // released before a full hold-tick -> counts as one click
+    }
+    wasFiring.current = controls.firing;
 
     // Laser beam: continuous while the button is held, then a short fade.
     const bs = beamState.current;
