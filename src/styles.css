@@ -156,13 +156,34 @@ canvas {
   overflow: hidden;
 }
 
-.action-popup__icon {
+.action-popup {
   position: fixed;
   pointer-events: none;
   will-change: transform, opacity;
   animation-name: action-popup-fly;
   animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   animation-fill-mode: forwards;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.action-popup__icon {
+  display: block;
+}
+
+.action-popup__value {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  color: #fff;
+  white-space: nowrap;
+  text-shadow:
+    -1px -1px 0 #000,
+    1px -1px 0 #000,
+    -1px 1px 0 #000,
+    1px 1px 0 #000;
 }
 
 /* Percentages assume the 2650ms total from ActionPopups.jsx's

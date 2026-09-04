@@ -13,6 +13,7 @@ import { createControlsState } from "./controls.js";
 import { HEX_PAD_NAMES, HEX_PAD_TIERS } from "./hexPowerPads.js";
 import { AFK_REBIRTH_REQUIRED } from "./afkTargets.js";
 import { formatCompactNumber } from "./formatNumber.js";
+import { actionGain } from "./playerProgression.js";
 
 class ErrBoundary extends Component {
   state = { err: null };
@@ -118,10 +119,15 @@ export default function App() {
 
   const handleAction = useCallback(
     (multiplier) => {
+      // Computed before registerAction commits the update -- prev stats
+      // still equal progression.stats here, and actionGain is the same
+      // clamp-aware formula registerAction itself applies (src/playerProgression.js),
+      // so the popup always shows the exact Power delta that lands.
+      const gain = actionGain(progression.stats, multiplier);
       progression.registerAction(multiplier);
-      popupsRef.current?.spawn();
+      popupsRef.current?.spawn(gain);
     },
-    [progression.registerAction],
+    [progression.registerAction, progression.stats],
   );
 
   // Win floor panels (src/winPanels.js): Player.jsx already teleported the
@@ -146,6 +152,8 @@ export default function App() {
   // Player.jsx only reports "E was pressed near this pad" -- this decides
   // whether that means buy (locked, and affordable) or equip (owned).
   // Wins are spent as currency on buy (Wins never affects Power directly).
+  // Equipping sets PowerPerAction (the per-Action gain rate), not Power
+  // itself -- Power only ever changes via registerAction/acceptRebirth.
   const handleHexPadInteract = useCallback(
     (name) => {
       const idx = HEX_PAD_NAMES.indexOf(name);
@@ -154,7 +162,7 @@ export default function App() {
       if (boughtPads.has(name)) {
         if (equippedPad === name) return; // already equipped
         setEquippedPad(name);
-        progression.equipLaser(tier.power);
+        progression.setPowerPerAction(tier.power);
       } else if (progression.stats.wins >= tier.winsRequired) {
         progression.spendWins(tier.winsRequired);
         setBoughtPads((prev) => {

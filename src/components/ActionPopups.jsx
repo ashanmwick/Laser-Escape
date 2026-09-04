@@ -1,10 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { formatCompactNumber } from "../formatNumber.js";
 
 /**
  * Fire-and-forget "Action" feedback: every time the player performs an
  * Action (see Player.jsx's action-tracking + usePlayerProgression's
- * registerAction), one of these pops up near screen center and flies
- * toward the HUD's Power stat, fading out before it visually arrives.
+ * registerAction), one of these pops up near screen center -- the icon plus
+ * a "+N" label for the Power just gained -- and flies toward the HUD's
+ * Power stat, fading out before it visually arrives.
  *
  * Fully imperative DOM (like TouchControls' reticle) rather than React
  * state -- nothing else needs to read "how many popups are active", so
@@ -27,7 +29,7 @@ const ActionPopups = forwardRef(function ActionPopups({ targetRef }, ref) {
   useImperativeHandle(
     ref,
     () => ({
-      spawn() {
+      spawn(gain) {
         const container = containerRef.current;
         const target = targetRef?.current;
         if (!container || !target) return;
@@ -44,23 +46,34 @@ const ActionPopups = forwardRef(function ActionPopups({ targetRef }, ref) {
         const dx = (targetX - spawnX) * STOP_SHORT_FRACTION;
         const dy = (targetY - spawnY) * STOP_SHORT_FRACTION;
 
+        const wrapper = document.createElement("div");
+        wrapper.className = "action-popup";
+        wrapper.style.left = `${spawnX}px`;
+        wrapper.style.top = `${spawnY}px`;
+        wrapper.style.animationDuration = `${ANIMATION_DURATION_MS}ms`;
+        wrapper.style.setProperty("--popup-dx", `${dx}px`);
+        wrapper.style.setProperty("--popup-dy", `${dy}px`);
+
         const img = document.createElement("img");
         img.src = ICON_SRC;
         img.alt = "";
         img.className = "action-popup__icon";
-        img.style.left = `${spawnX}px`;
-        img.style.top = `${spawnY}px`;
         img.style.width = `${ICON_SIZE_PX}px`;
         img.style.height = `${ICON_SIZE_PX}px`;
-        img.style.animationDuration = `${ANIMATION_DURATION_MS}ms`;
-        img.style.setProperty("--popup-dx", `${dx}px`);
-        img.style.setProperty("--popup-dy", `${dy}px`);
+        wrapper.appendChild(img);
 
-        const remove = () => img.remove();
-        img.addEventListener("animationend", remove, { once: true });
+        if (gain > 0) {
+          const value = document.createElement("div");
+          value.className = "action-popup__value";
+          value.textContent = `+${formatCompactNumber(gain)}`;
+          wrapper.appendChild(value);
+        }
+
+        const remove = () => wrapper.remove();
+        wrapper.addEventListener("animationend", remove, { once: true });
         setTimeout(remove, ANIMATION_DURATION_MS + 100);
 
-        container.appendChild(img);
+        container.appendChild(wrapper);
       },
     }),
     [targetRef],

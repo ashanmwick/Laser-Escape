@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   PROGRESSION_INITIAL,
   PROGRESSION_RANGES,
+  actionGain,
   clampStat,
   levelForPower,
   rebirthRequirement,
@@ -32,23 +33,11 @@ export default function usePlayerProgression() {
 
   const registerAction = useCallback((multiplier = 1) => {
     setStats((prev) => {
-      const gain = prev.powerPerAction * (prev.rebirth + 1) * multiplier;
+      const gain = actionGain(prev, multiplier);
       const power = clampStat("power", prev.power + gain);
       const level = levelForPower(power);
       if (power === prev.power && level === prev.level) return prev;
       return { ...prev, power, level };
-    });
-  }, []);
-
-  // Sets Power directly to an arbitrary value (clamped) and re-derives
-  // Level in the same update, same as registerAction/acceptRebirth do for
-  // their own Power changes. Used by hex power pad "equip" (src/hexPowerPads.js).
-  const equipLaser = useCallback((power) => {
-    setStats((prev) => {
-      const nextPower = clampStat("power", power);
-      const nextLevel = levelForPower(nextPower);
-      if (nextPower === prev.power && nextLevel === prev.level) return prev;
-      return { ...prev, power: nextPower, level: nextLevel };
     });
   }, []);
 
@@ -85,7 +74,6 @@ export default function usePlayerProgression() {
     () => ({
       stats,
       registerAction,
-      equipLaser,
       canRebirth:
         stats.rebirth < PROGRESSION_RANGES.rebirth.max &&
         stats.level >= rebirthRequirement(stats.rebirth),
@@ -97,6 +85,6 @@ export default function usePlayerProgression() {
       setPowerPerAction: (v) => setStat("powerPerAction", v),
       addPowerPerAction: (d) => addStat("powerPerAction", d),
     }),
-    [stats, registerAction, equipLaser, acceptRebirth, setStat, addStat],
+    [stats, registerAction, acceptRebirth, setStat, addStat],
   );
 }

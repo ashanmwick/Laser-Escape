@@ -39,3 +39,12 @@ export function levelForPower(power) {
 export function rebirthRequirement(rebirth) {
   return (rebirth + 1) * 10;
 }
+
+// Actual Power delta one Action grants off the given stats (accounting for
+// the max-Power clamp near the cap) -- shared by registerAction
+// (usePlayerProgression.js, which applies it) and ActionPopups' "+N" label
+// (App.jsx, which only displays it) so the two can never disagree.
+export function actionGain(stats, multiplier = 1) {
+  const raw = stats.powerPerAction * (stats.rebirth + 1) * multiplier;
+  return Math.max(0, Math.min(raw, PROGRESSION_RANGES.power.max - stats.power));
+}
