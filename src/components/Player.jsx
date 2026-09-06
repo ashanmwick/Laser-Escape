@@ -64,7 +64,8 @@ import { WIN_PANEL_TRIGGER_RADIUS } from "../winPanels.js";
  * `onAfkNearChange`/`onAfkActiveChange` (AFK prompt state).
  */
 
-const SPEED = 5;
+const SPEED = 8;
+const BASE_SPEED = 5; // SPEED the procedural gait cycle below was tuned at
 const JUMP_SPEED = 5.5;
 const CAPSULE_RADIUS = 0.3;
 const CAPSULE_HALF_HEIGHT = 0.6; // cylinder half-height (~1.8 total)
@@ -101,6 +102,18 @@ const GAIT_BONES = [
   "CC_Base_Spine02",
 ];
 const ARM_DOWN = 1.2; // rad: drop the arms from the T-pose to the sides
+
+// Running-gait amplitudes (rad unless noted). Bigger than a walk cycle would
+// use: a sprint drives the arms and knees through a much wider range and
+// leans the torso into the direction of travel.
+const RUN_ARM_SWING = 0.7; // upper-arm fore/aft pump
+const RUN_FOREARM_BEND = 0.9; // elbow bend range
+const RUN_THIGH_SWING = 0.8; // hip fore/aft
+const RUN_CALF_TUCK = 1.1; // knee bend on the recovery swing
+const RUN_SPINE_ARCH = 0.08;
+const RUN_SPINE_TWIST = 0.14;
+const RUN_LEAN_MAX = 0.16; // forward torso lean at full gait
+const RUN_BOB_AMP = 0.06; // vertical bounce
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const GEO_UP = new THREE.Vector3(0, 1, 0);
@@ -774,24 +787,29 @@ export default function Player({
       step,
     );
     const g = gait.current;
-    if (g > 0.005) phase.current += step * (7 + 3 * g);
+    if (g > 0.005) phase.current += step * (7 + 3 * g) * (SPEED / BASE_SPEED);
     const sw = Math.sin(phase.current);
     const cw = Math.cos(phase.current);
 
-    // arms drop to the sides (even idle) and swing opposite the legs
-    poseBone("CC_Base_L_Upperarm", 0, 0, -ARM_DOWN - 0.4 * sw * g);
-    poseBone("CC_Base_R_Upperarm", 0, 0, ARM_DOWN - 0.4 * sw * g);
-    poseBone("CC_Base_L_Forearm", 0.6 * g * (0.5 - 0.5 * cw), 0, 0);
-    poseBone("CC_Base_R_Forearm", 0.6 * g * (0.5 + 0.5 * cw), 0, 0);
-    // thighs swing fore/aft, calves tuck on the rear swing
-    poseBone("CC_Base_L_Thigh", 0.6 * sw * g, 0, 0);
-    poseBone("CC_Base_R_Thigh", -0.6 * sw * g, 0, 0);
-    poseBone("CC_Base_L_Calf", Math.max(0, -0.95 * sw) * g, 0, 0);
-    poseBone("CC_Base_R_Calf", Math.max(0, 0.95 * sw) * g, 0, 0);
-    // subtle torso twist + vertical bob
-    poseBone("CC_Base_Spine02", 0.06 * g, -0.12 * sw * g, 0);
+    // arms drop to the sides (even idle) and pump opposite the legs
+    poseBone("CC_Base_L_Upperarm", 0, 0, -ARM_DOWN - RUN_ARM_SWING * sw * g);
+    poseBone("CC_Base_R_Upperarm", 0, 0, ARM_DOWN - RUN_ARM_SWING * sw * g);
+    poseBone("CC_Base_L_Forearm", RUN_FOREARM_BEND * g * (0.5 - 0.5 * cw), 0, 0);
+    poseBone("CC_Base_R_Forearm", RUN_FOREARM_BEND * g * (0.5 + 0.5 * cw), 0, 0);
+    // thighs drive fore/aft, calves tuck high on the recovery swing
+    poseBone("CC_Base_L_Thigh", RUN_THIGH_SWING * sw * g, 0, 0);
+    poseBone("CC_Base_R_Thigh", -RUN_THIGH_SWING * sw * g, 0, 0);
+    poseBone("CC_Base_L_Calf", Math.max(0, -RUN_CALF_TUCK * sw) * g, 0, 0);
+    poseBone("CC_Base_R_Calf", Math.max(0, RUN_CALF_TUCK * sw) * g, 0, 0);
+    // torso twist/arch + a forward lean into the sprint
+    poseBone(
+      "CC_Base_Spine02",
+      RUN_SPINE_ARCH * g - RUN_LEAN_MAX * g,
+      -RUN_SPINE_TWIST * sw * g,
+      0,
+    );
     if (inner.current) {
-      inner.current.position.y = fit.y + Math.abs(sw) * 0.04 * g;
+      inner.current.position.y = fit.y + Math.abs(sw) * RUN_BOB_AMP * g;
     }
 
     // AFK auto-fire (src/afkTargets.js): find the nearest in-range target
