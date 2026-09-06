@@ -10,6 +10,7 @@ import { WALL_NAMES, WALL_STRENGTH, WALL_MAX_HEALTH } from "../wallMaterials.js"
 import { AFK_TARGET_NAMES } from "../afkTargets.js";
 import { HEX_PAD_NAMES } from "../hexPowerPads.js";
 import { WIN_PANEL_NAMES, WIN_PANEL_WINS } from "../winPanels.js";
+import { flattenMaterial } from "../flattenMaterial.js";
 
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
@@ -114,6 +115,7 @@ export default function World({
       if (o.isMesh) {
         o.castShadow = true;
         o.receiveShadow = true;
+        flattenMaterial(o.material);
       }
     });
   }, [scene]);

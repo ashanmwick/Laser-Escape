@@ -12,6 +12,7 @@ import {
   PITCH_MAX,
 } from "../controls.js";
 import { damagePerSecond } from "../wallMaterials.js";
+import { flattenMaterial } from "../flattenMaterial.js";
 import { ACTION_HOLD_SECONDS } from "../playerProgression.js";
 import { GROUP_PLAYER, PLAYER_FILTER } from "../collisionGroups.js";
 import {
@@ -206,6 +207,7 @@ export default function Player({
       if (o.isMesh || o.isSkinnedMesh) {
         o.castShadow = true;
         o.frustumCulled = false;
+        flattenMaterial(o.material);
       }
       if (o.isBone && GAIT_BONES.includes(o.name)) {
         bones.current[o.name] = o;

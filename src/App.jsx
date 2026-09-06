@@ -74,6 +74,8 @@ function Target({ id, position, hit, onHit }) {
         color={hit ? "#28c76f" : "#ff2d55"}
         emissive={hit ? "#0d5c33" : "#5c0d22"}
         emissiveIntensity={0.8}
+        roughness={1}
+        metalness={0}
       />
     </mesh>
   );
@@ -179,22 +181,27 @@ export default function App() {
 
   return (
     <>
-      <Canvas shadows camera={{ fov: 70, near: 0.1, far: 500, position: [0, 3, 8] }}>
+      <Canvas flat shadows camera={{ fov: 70, near: 0.1, far: 500, position: [0, 3, 8] }}>
         <color attach="background" args={["#0b0d12"]} />
-        <Sky sunPosition={[40, 30, 20]} turbidity={6} rayleigh={1.5} />
-        <hemisphereLight args={["#bcd4ff", "#4a4436", 0.7]} />
-        <ambientLight intensity={0.35} />
+        <Sky sunPosition={[40, 30, 20]} turbidity={3} rayleigh={1} />
+        <hemisphereLight args={["#bcd4ff", "#4a4436", 2]} />
+        <ambientLight intensity={1} />
         <directionalLight
           position={[30, 40, 20]}
-          intensity={2.2}
+          intensity={1}
           castShadow
-          shadow-mapSize={[2048, 2048]}
+          shadow-mapSize={isTouch ? [1024, 1024] : [2048, 2048]}
+          shadow-radius={4}
           shadow-camera-left={-60}
           shadow-camera-right={60}
           shadow-camera-top={60}
           shadow-camera-bottom={-60}
           shadow-camera-far={200}
         />
+        {/* Fill light opposite the sun so unlit faces don't go dark -- Roblox's
+            flat lighting has very little side-to-side contrast, unlike a
+            single-sun setup where the far side of every object goes gray. */}
+        <directionalLight position={[-30, 20, -20]} intensity={0.6} />
 
         <ErrBoundary>
           <Suspense fallback={null}>
