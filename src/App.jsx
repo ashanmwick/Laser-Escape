@@ -1,14 +1,17 @@
-import { Component, Suspense, useCallback, useMemo, useRef, useState } from "react";
+import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Sky } from "@react-three/drei";
 import { Physics } from "@react-three/rapier";
+import { Callbacks } from "@colyseus/sdk";
 import World from "./components/World.jsx";
 import Player from "./components/Player.jsx";
+import RemotePlayers from "./components/RemotePlayers.jsx";
 import TouchControls from "./components/TouchControls.jsx";
 import PortraitOverlay from "./components/PortraitOverlay.jsx";
 import ActionPopups from "./components/ActionPopups.jsx";
 import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
 import usePlayerProgression from "./hooks/usePlayerProgression.js";
+import { useNetwork } from "./network/NetworkContext.jsx";
 import { createControlsState } from "./controls.js";
 import { HEX_PAD_NAMES, HEX_PAD_TIERS } from "./hexPowerPads.js";
 import { AFK_REBIRTH_REQUIRED } from "./afkTargets.js";
@@ -86,6 +89,7 @@ export default function App() {
   const controls = useMemo(() => createControlsState(), []);
   const isTouch = useIsTouchDevice();
   const progression = usePlayerProgression();
+  const { roomRef, connected, sendTargetHit, sendWallDestroyed, sendWinPanelHit } = useNetwork();
   const powerStatRef = useRef(null);
   const popupsRef = useRef(null);
   const [nearAfkTarget, setNearAfkTarget] = useState(null);
@@ -101,7 +105,11 @@ export default function App() {
   const wallHealth = useMemo(() => new Map(), []);
   const [destroyedWalls, setDestroyedWalls] = useState(() => new Set());
 
-  const handleTargetHit = useCallback((id) => {
+  // Local-state mutation only, no network send -- used both for the local
+  // player's own hits (via handleTargetHit below) and for hits reported by
+  // other players through the reconciliation effect further down, so a
+  // remote-caused hit doesn't get re-broadcast back to the server.
+  const handleTargetHitLocalOnly = useCallback((id) => {
     setHits((prev) => {
       if (prev.has(id)) return prev;
       const next = new Set(prev);
@@ -110,7 +118,15 @@ export default function App() {
     });
   }, []);
 
-  const handleWallDestroyed = useCallback((wallType) => {
+  const handleTargetHit = useCallback(
+    (id) => {
+      if (!hits.has(id)) sendTargetHit(id);
+      handleTargetHitLocalOnly(id);
+    },
+    [hits, sendTargetHit, handleTargetHitLocalOnly],
+  );
+
+  const handleWallDestroyedLocalOnly = useCallback((wallType) => {
     setDestroyedWalls((prev) => {
       if (prev.has(wallType)) return prev;
       const next = new Set(prev);
@@ -118,6 +134,14 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const handleWallDestroyed = useCallback(
+    (wallType) => {
+      if (!destroyedWalls.has(wallType)) sendWallDestroyed(wallType);
+      handleWallDestroyedLocalOnly(wallType);
+    },
+    [destroyedWalls, sendWallDestroyed, handleWallDestroyedLocalOnly],
+  );
 
   const handleAction = useCallback(
     (multiplier) => {
@@ -142,9 +166,54 @@ export default function App() {
       progression.addWins(wins);
       for (const entry of wallHealth.values()) entry.hp = entry.maxHp;
       setDestroyedWalls((prev) => (prev.size === 0 ? prev : new Set()));
+      sendWinPanelHit();
     },
-    [progression.addWins, wallHealth],
+    [progression.addWins, wallHealth, sendWinPanelHit],
   );
+
+  // Reconciliation: merge shared-arena state reported by OTHER players (via
+  // the Colyseus room, src/network/NetworkContext.jsx) into these same local
+  // Map/Set structures. Walls only ever adopt a network hp value LOWER than
+  // what's already held locally (damage never reverses except via the
+  // resetNonce signal below) -- this stops a throttled/stale wallDamage
+  // packet from visibly rewinding a wall's HP bar after our own optimistic
+  // local write already took it lower.
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room) return;
+    const callbacks = Callbacks.get(room);
+
+    const offTargets = callbacks.onAdd("targetsHit", (_v, targetId) =>
+      handleTargetHitLocalOnly(targetId),
+    );
+
+    const wallFieldUnsubs = [];
+    const offWalls = callbacks.onAdd("walls", (wallState, wallType) => {
+      const applyIfMoreDamaged = () => {
+        const entry = wallHealth.get(wallType);
+        if (!entry) return;
+        if (wallState.hp < entry.hp) entry.hp = wallState.hp;
+        if (wallState.destroyed) handleWallDestroyedLocalOnly(wallType);
+      };
+      applyIfMoreDamaged();
+      wallFieldUnsubs.push(callbacks.listen(wallState, "hp", applyIfMoreDamaged));
+    });
+
+    // previous === undefined is the initial registration fire (current
+    // value, not a real change) -- skip it, only react to an actual reset.
+    const offReset = callbacks.listen("resetNonce", (_value, previous) => {
+      if (previous === undefined) return;
+      for (const entry of wallHealth.values()) entry.hp = entry.maxHp;
+      setDestroyedWalls(new Set());
+    });
+
+    return () => {
+      offTargets();
+      offWalls();
+      wallFieldUnsubs.forEach((unsub) => unsub());
+      offReset();
+    };
+  }, [connected, wallHealth, handleTargetHitLocalOnly, handleWallDestroyedLocalOnly]);
 
   const handleAfkNearChange = useCallback((name) => setNearAfkTarget(name), []);
   const handleAfkActiveChange = useCallback((active) => setAfkActive(active), []);
@@ -236,6 +305,7 @@ export default function App() {
                 laserPower={progression.stats.power}
                 rebirth={progression.stats.rebirth}
               />
+              <RemotePlayers />
             </Physics>
           </Suspense>
         </ErrBoundary>

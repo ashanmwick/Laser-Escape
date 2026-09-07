@@ -5,19 +5,24 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "npm --prefix server run start",
+    "dev:all": "concurrently -n client,server -c blue,green \"npm run dev\" \"npm run dev:server\"",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@colyseus/sdk": "^0.18.2",
     "@react-three/drei": "^9.114.3",
     "@react-three/fiber": "^8.17.10",
     "@react-three/rapier": "^1.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "three": "^0.169.0"
+    "three": "^0.169.0",
+    "three-stdlib": "^2.36.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.2.4",
     "vite": "^5.4.10"
   }
 }
