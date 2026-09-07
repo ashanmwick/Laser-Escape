@@ -8,6 +8,7 @@ import Player from "./components/Player.jsx";
 import RemotePlayers from "./components/RemotePlayers.jsx";
 import TouchControls from "./components/TouchControls.jsx";
 import PortraitOverlay from "./components/PortraitOverlay.jsx";
+import ConnectionStatus from "./components/ConnectionStatus.jsx";
 import ActionPopups from "./components/ActionPopups.jsx";
 import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
 import usePlayerProgression from "./hooks/usePlayerProgression.js";
@@ -313,6 +314,7 @@ export default function App() {
 
       {isTouch && <TouchControls controls={controls} />}
       {isTouch && <PortraitOverlay />}
+      <ConnectionStatus />
       <ActionPopups ref={popupsRef} targetRef={powerStatRef} />
 
       {(() => {
