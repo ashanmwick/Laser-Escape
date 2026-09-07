@@ -3,7 +3,7 @@ import { RigidBody, interactionGroups } from "@react-three/rapier";
 import * as THREE from "three";
 import { GROUP_DEBRIS } from "../collisionGroups.js";
 
-const FRAGMENT_COUNT = 22;
+const DEFAULT_FRAGMENT_COUNT = 22;
 const LIFETIME_MS = 6000;
 const SIZE_FRACTION = 1 / 5; // each fragment's *average* size is ~1/5 of the wall's own dimensions
 const DEBRIS_GROUPS = interactionGroups(GROUP_DEBRIS);
@@ -21,7 +21,13 @@ function randRange(min, max) {
  * the whole burst unmounts itself after a few seconds. They're on their own
  * collision group so the player walks straight through them.
  */
-export default function WallDebris({ position, quaternion, size, material }) {
+export default function WallDebris({
+  position,
+  quaternion,
+  size,
+  material,
+  fragmentCount = DEFAULT_FRAGMENT_COUNT,
+}) {
   const [alive, setAlive] = useState(true);
 
   useEffect(() => {
@@ -38,7 +44,7 @@ export default function WallDebris({ position, quaternion, size, material }) {
     ];
     const quatArr = [quaternion.x, quaternion.y, quaternion.z, quaternion.w];
     const list = [];
-    for (let i = 0; i < FRAGMENT_COUNT; i++) {
+    for (let i = 0; i < fragmentCount; i++) {
       const local = new THREE.Vector3(
         randRange(-w / 2, w / 2),
         randRange(-h / 2, h / 2),

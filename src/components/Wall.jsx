@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
-import { useFrame } from "@react-three/fiber";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useFrame, useThree } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import { RigidBody } from "@react-three/rapier";
 import * as THREE from "three";
@@ -9,6 +9,13 @@ import WallDebris from "./WallDebris.jsx";
 const DARK_COLOR = new THREE.Color("#1a1512");
 const DARKEN_MAX = 0.4; // cap how far color drifts toward DARK_COLOR so cracks stay legible
 const HP_BAR_FADE_IN = 0.15; // damage fraction where cracks first appear
+// Health bars beyond this range aren't useful anyway, and drei's Html
+// occlusion mode raycasts the whole level per wall per frame -- hiding the
+// bar (and its occlusion check) once far away avoids that cost for every
+// still-standing wall the camera isn't near. Hysteresis avoids flicker
+// right at the boundary.
+const HP_BAR_HIDE_DIST = 35;
+const HP_BAR_SHOW_DIST = 30;
 
 /**
  * One damageable wall: its own removable collider (so it can become
@@ -23,6 +30,7 @@ export default function Wall({
   wallHealth,
   destroyed,
   onDestroyed,
+  debrisCount,
   occludeScene,
   occludeWalls,
 }) {
@@ -30,6 +38,8 @@ export default function Wall({
   const pctRef = useRef(null);
   const overlayRef = useRef(null);
   const notifiedRef = useRef(false);
+  const { camera } = useThree();
+  const [nearCamera, setNearCamera] = useState(true);
 
   // `destroyed` flips back to false when a win floor panel resets the run
   // (App.jsx's handleWinPanelHit clears destroyedWalls + restores HP) --
@@ -72,6 +82,11 @@ export default function Wall({
 
   useFrame(() => {
     if (destroyed) return;
+
+    const distSq = camera.position.distanceToSquared(mesh.position);
+    if (nearCamera && distSq > HP_BAR_HIDE_DIST * HP_BAR_HIDE_DIST) setNearCamera(false);
+    else if (!nearCamera && distSq < HP_BAR_SHOW_DIST * HP_BAR_SHOW_DIST) setNearCamera(true);
+
     const entry = wallHealth.get(wallType);
     if (!entry) return;
     const frac = THREE.MathUtils.clamp(entry.hp / entry.maxHp, 0, 1);
@@ -117,6 +132,7 @@ export default function Wall({
         quaternion={mesh.quaternion}
         size={wallSize}
         material={mesh.material}
+        fragmentCount={debrisCount}
       />
     );
   }
@@ -145,43 +161,45 @@ export default function Wall({
         />
       </mesh>
 
-      <Html position={[mesh.position.x, anchorY, mesh.position.z]} occlude={occludeTargets} center>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-          <div
-            style={{
-              width: 60,
-              height: 6,
-              background: "rgba(0,0,0,0.5)",
-              border: "1px solid rgba(255,255,255,0.4)",
-              borderRadius: 3,
-              overflow: "hidden",
-              pointerEvents: "none",
-            }}
-          >
+      {nearCamera && (
+        <Html position={[mesh.position.x, anchorY, mesh.position.z]} occlude={occludeTargets} center>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
             <div
-              ref={barRef}
               style={{
-                width: "100%",
-                height: "100%",
-                background: "#28c76f",
+                width: 60,
+                height: 6,
+                background: "rgba(0,0,0,0.5)",
+                border: "1px solid rgba(255,255,255,0.4)",
+                borderRadius: 3,
+                overflow: "hidden",
+                pointerEvents: "none",
               }}
-            />
+            >
+              <div
+                ref={barRef}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  background: "#28c76f",
+                }}
+              />
+            </div>
+            <div
+              ref={pctRef}
+              style={{
+                fontSize: 10,
+                lineHeight: 1,
+                color: "#fff",
+                textShadow: "0 1px 2px rgba(0,0,0,0.9)",
+                pointerEvents: "none",
+                fontFamily: "monospace",
+              }}
+            >
+              100%
+            </div>
           </div>
-          <div
-            ref={pctRef}
-            style={{
-              fontSize: 10,
-              lineHeight: 1,
-              color: "#fff",
-              textShadow: "0 1px 2px rgba(0,0,0,0.9)",
-              pointerEvents: "none",
-              fontFamily: "monospace",
-            }}
-          >
-            100%
-          </div>
-        </div>
-      </Html>
+        </Html>
+      )}
     </group>
   );
 }

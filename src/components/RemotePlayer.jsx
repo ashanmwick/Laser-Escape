@@ -16,6 +16,7 @@ import {
 } from "../playerModel.js";
 
 const GEO_UP = new THREE.Vector3(0, 1, 0);
+const _beamDir = new THREE.Vector3();
 
 /**
  * Render+animate-only counterpart to Player.jsx for another connected
@@ -30,17 +31,15 @@ export default function RemotePlayer({ sessionId, remotePlayersRef }) {
   const rig = useRef(null);
   const inner = useRef(null);
   const beam = useRef(null);
-  const bones = useRef({});
-  const rest = useRef({});
+  const poseBone = useRef(() => {}); // rebuilt whenever the model's gait bones change, not per-frame
   const phase = useRef(0);
   const gait = useRef(0);
 
   const fit = useMemo(() => computeModelFit(model), [model]);
 
   useEffect(() => {
-    const { bones: b, rest: r } = collectGaitBones(model);
-    bones.current = b;
-    rest.current = r;
+    const { bones, rest } = collectGaitBones(model);
+    poseBone.current = makePoseBone(bones, rest);
   }, [model]);
 
   // Smoothed toward the last network sample -- exponential damp, not a full
@@ -72,8 +71,7 @@ export default function RemotePlayer({ sessionId, remotePlayersRef }) {
     }
 
     const g = advanceGaitPhase(phase, gait, p.speed, dt);
-    const poseBone = makePoseBone(bones.current, rest.current);
-    const sw = applyGaitPose(poseBone, phase.current, g);
+    const sw = applyGaitPose(poseBone.current, phase.current, g);
     if (inner.current) {
       inner.current.position.y = fit.y + Math.abs(sw) * RUN_BOB_AMP * g;
     }
@@ -89,8 +87,8 @@ export default function RemotePlayer({ sessionId, remotePlayersRef }) {
         const toZ = p.beamToZ;
         const len = Math.hypot(toX - fromX, toY - fromY, toZ - fromZ);
         mesh.position.set((fromX + toX) / 2, (fromY + toY) / 2, (fromZ + toZ) / 2);
-        const dir = new THREE.Vector3(toX - fromX, toY - fromY, toZ - fromZ).normalize();
-        mesh.quaternion.setFromUnitVectors(GEO_UP, dir);
+        _beamDir.set(toX - fromX, toY - fromY, toZ - fromZ).normalize();
+        mesh.quaternion.setFromUnitVectors(GEO_UP, _beamDir);
         mesh.scale.set(1, Math.max(len, 0.001), 1);
         mesh.material.opacity = 0.8 + 0.2 * Math.sin(performance.now() * 0.05);
         mesh.visible = true;

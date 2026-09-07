@@ -1,6 +1,8 @@
 import { useEffect, useMemo } from "react";
 import { useGLTF } from "@react-three/drei";
+import { useThree } from "@react-three/fiber";
 import { RigidBody } from "@react-three/rapier";
+import { KTX2Loader } from "three-stdlib";
 import * as THREE from "three";
 import Wall from "./Wall.jsx";
 import HexPowerPad from "./HexPowerPad.jsx";
@@ -24,14 +26,32 @@ const _scale = new THREE.Vector3();
  * behaviour (see Wall.jsx) -- a merged trimesh can't drop one piece of its
  * geometry independently.
  */
+// Below this local bounding-box size (largest dimension, in world units),
+// a mesh is decorative enough that its own shadow isn't worth the shadow-
+// pass draw call -- walls and other structural geometry are 4+ units,
+// small props (crates, grass blocks, tree knots) are ~1 unit or less.
+const SHADOW_CASTER_MIN_SIZE = 2;
+
+const _size = new THREE.Vector3();
+
 export default function World({
   wallHealth,
   destroyedWalls,
   onWallDestroyed,
   boughtPads,
   equippedPad,
+  debrisCount,
 }) {
-  const { scene } = useGLTF("/world.glb");
+  const { gl } = useThree();
+  // world.glb's textures are KTX2/Basis (see scripts/compress-world.mjs) --
+  // drei's useGLTF wires Draco/meshopt by default but not KTX2, so it needs
+  // an explicit loader here. detectSupport is synchronous (just reads WebGL
+  // extension flags); the transcoder WASM itself loads lazily on first use.
+  const extendLoader = useMemo(() => {
+    const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/").detectSupport(gl);
+    return (loader) => loader.setKTX2Loader(ktx2Loader);
+  }, [gl]);
+  const { scene } = useGLTF("/world.glb", true, true, extendLoader);
 
   const walls = useMemo(() => {
     const found = [];
@@ -86,6 +106,11 @@ export default function World({
     const found = [];
     scene.traverse((o) => {
       if (o.isMesh && HEX_PAD_NAMES.includes(o.name)) {
+        // The 15 pads are linked duplicates in the Blender export -- they
+        // all share one THREE.Material instance by default, so recoloring
+        // one in HexPowerPad.jsx would recolor all of them. Give each its
+        // own clone before anything reads or mutates it.
+        o.material = o.material.clone();
         o.userData.isHexPad = true;
         found.push(o);
       }
@@ -113,7 +138,12 @@ export default function World({
   useEffect(() => {
     scene.traverse((o) => {
       if (o.isMesh) {
-        o.castShadow = true;
+        // Only structurally-significant meshes cast a shadow -- receiving
+        // stays universal since that side of the shadow pass is cheap, and
+        // small props still want ground contact shadows falling on them.
+        o.geometry.computeBoundingBox();
+        o.geometry.boundingBox.getSize(_size).multiply(o.scale);
+        o.castShadow = Math.max(_size.x, _size.y, _size.z) >= SHADOW_CASTER_MIN_SIZE;
         o.receiveShadow = true;
         flattenMaterial(o.material);
       }
@@ -133,6 +163,7 @@ export default function World({
           wallHealth={wallHealth}
           destroyed={destroyedWalls.has(wallType)}
           onDestroyed={onWallDestroyed}
+          debrisCount={debrisCount}
           occludeScene={scene}
           occludeWalls={walls
             .filter((w) => w.wallType !== wallType && !destroyedWalls.has(w.wallType))
@@ -162,4 +193,9 @@ export default function World({
   );
 }
 
-useGLTF.preload("/world.glb");
+// Not preloaded at module scope (unlike player.glb): world.glb's textures
+// are KTX2, which needs a renderer-configured KTX2Loader (see extendLoader
+// above) -- a bare useGLTF.preload("/world.glb") here would race the
+// component's properly-configured load under the same suspense cache key,
+// and if it won, GLTFLoader would hit the KTX2 texture extension with no
+// KTX2Loader registered and throw.

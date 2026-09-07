@@ -2,6 +2,7 @@ import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState 
 import { Canvas } from "@react-three/fiber";
 import { Sky } from "@react-three/drei";
 import { Physics } from "@react-three/rapier";
+import { Perf } from "r3f-perf";
 import { Callbacks } from "@colyseus/sdk";
 import World from "./components/World.jsx";
 import Player from "./components/Player.jsx";
@@ -11,6 +12,7 @@ import PortraitOverlay from "./components/PortraitOverlay.jsx";
 import ConnectionStatus from "./components/ConnectionStatus.jsx";
 import ActionPopups from "./components/ActionPopups.jsx";
 import useIsTouchDevice from "./hooks/useIsTouchDevice.js";
+import useQualityTier from "./hooks/useQualityTier.js";
 import usePlayerProgression from "./hooks/usePlayerProgression.js";
 import { useNetwork } from "./network/NetworkContext.jsx";
 import { createControlsState } from "./controls.js";
@@ -89,6 +91,7 @@ export default function App() {
   const [hits, setHits] = useState(() => new Set());
   const controls = useMemo(() => createControlsState(), []);
   const isTouch = useIsTouchDevice();
+  const { tier, settings: quality, preference: qualityPreference, setTierPreference } = useQualityTier(isTouch);
   const progression = usePlayerProgression();
   const { roomRef, connected, sendTargetHit, sendWallDestroyed, sendWinPanelHit } = useNetwork();
   const powerStatRef = useRef(null);
@@ -251,7 +254,14 @@ export default function App() {
 
   return (
     <>
-      <Canvas flat shadows camera={{ fov: 70, near: 0.1, far: 500, position: [0, 3, 8] }}>
+      <Canvas
+        flat
+        shadows={quality.shadows}
+        dpr={[1, quality.dprCap]}
+        gl={{ antialias: quality.antialias, powerPreference: "high-performance" }}
+        camera={{ fov: 70, near: 0.1, far: 500, position: [0, 3, 8] }}
+      >
+        {import.meta.env.DEV && <Perf position="top-left" />}
         <color attach="background" args={["#0b0d12"]} />
         <Sky sunPosition={[40, 30, 20]} turbidity={3} rayleigh={1} />
         <hemisphereLight args={["#bcd4ff", "#4a4436", 2]} />
@@ -259,8 +269,8 @@ export default function App() {
         <directionalLight
           position={[30, 40, 20]}
           intensity={1}
-          castShadow
-          shadow-mapSize={isTouch ? [1024, 1024] : [2048, 2048]}
+          castShadow={quality.shadows}
+          shadow-mapSize={[quality.shadowMapSize, quality.shadowMapSize]}
           shadow-radius={4}
           shadow-camera-left={-60}
           shadow-camera-right={60}
@@ -282,6 +292,7 @@ export default function App() {
                 onWallDestroyed={handleWallDestroyed}
                 boughtPads={boughtPads}
                 equippedPad={equippedPad}
+                debrisCount={quality.debrisCount}
               />
               {TARGETS.map((t) => (
                 <Target
@@ -303,10 +314,11 @@ export default function App() {
                 onWinPanelHit={handleWinPanelHit}
                 controls={controls}
                 wallHealth={wallHealth}
+                destroyedWalls={destroyedWalls}
                 laserPower={progression.stats.power}
                 rebirth={progression.stats.rebirth}
               />
-              <RemotePlayers />
+              <RemotePlayers maxCount={quality.maxRemotePlayers} />
             </Physics>
           </Suspense>
         </ErrBoundary>
@@ -371,6 +383,19 @@ export default function App() {
             (next Rebirth at Lv {progression.rebirthRequiredLevel})
           </>
         )}
+        <br />
+        Graphics: {["auto", "low", "medium", "high"].map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => setTierPreference(opt)}
+            disabled={qualityPreference === opt}
+            style={{ marginLeft: 4, textTransform: "capitalize" }}
+          >
+            {opt}
+          </button>
+        ))}
+        {qualityPreference === "auto" && <> (detected: {tier})</>}
       </div>
     </>
   );

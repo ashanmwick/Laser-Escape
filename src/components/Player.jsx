@@ -90,7 +90,6 @@ const BEAM_MS = 130;
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const GEO_UP = new THREE.Vector3(0, 1, 0);
-const RAY_DOWN = { x: 0, y: -1, z: 0 };
 
 const KEYMAP = {
   KeyW: "forward",
@@ -115,6 +114,7 @@ export default function Player({
   onWinPanelHit,
   controls,
   wallHealth,
+  destroyedWalls,
   laserPower = 1,
   rebirth = 0,
 }) {
@@ -136,8 +136,7 @@ export default function Player({
   const model = gltf.scene;
 
   const inner = useRef(null); // scaled group (also bobs vertically while walking)
-  const bones = useRef({}); // name -> THREE.Bone
-  const rest = useRef({}); // name -> bind-pose quaternion
+  const poseBone = useRef(() => {}); // rebuilt whenever the model's gait bones change, not per-frame
   const phase = useRef(0); // walk-cycle phase
   const gait = useRef(0); // 0 idle .. 1 full-speed, eased
 
@@ -146,9 +145,8 @@ export default function Player({
   const fit = useMemo(() => computeModelFit(model), [model]);
 
   useEffect(() => {
-    const { bones: b, rest: r } = collectGaitBones(model);
-    bones.current = b;
-    rest.current = r;
+    const { bones, rest } = collectGaitBones(model);
+    poseBone.current = makePoseBone(bones, rest);
   }, [model]);
 
   // --- input ---------------------------------------------------------------
@@ -207,6 +205,18 @@ export default function Player({
     to: new THREE.Vector3(),
   });
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  // Reused rapier.Ray instances (origin/dir are plain mutable fields, not
+  // WASM handles) so the per-frame casts below don't allocate a new Ray
+  // every frame.
+  const rays = useMemo(
+    () => ({
+      beam: new rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }),
+      cam: new rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }),
+      ground: new rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }),
+    }),
+    [rapier],
+  );
 
   const tmp = useMemo(
     () => ({
@@ -360,6 +370,9 @@ export default function Player({
   }, [gl, controls]);
 
   // --- target array from userData tags ------------------------------------
+  // Targets never unmount (a hit only toggles visual/health state), so this
+  // only needs to re-scan when a wall is actually destroyed (Wall.jsx detaches
+  // the mesh from the scene at that point) -- not every frame while firing.
   const collect = useCallback(() => {
     const t = [];
     const w = [];
@@ -372,7 +385,7 @@ export default function Player({
   }, [scene]);
   useEffect(() => {
     collect();
-  }, [collect]);
+  }, [collect, destroyedWalls]);
 
   // Gather AFK targets (userData.isAfkTarget, tagged by World.jsx) once:
   // they're static world geometry, so there's no need to re-scan every
@@ -450,14 +463,18 @@ export default function Player({
       raycaster.far = LASER_RANGE;
       const origin = raycaster.ray.origin;
       tmp.dir.copy(raycaster.ray.direction);
-      collect();
 
       const tHit = raycaster.intersectObjects(targets.current, true)[0];
       const wMeshHit = raycaster.intersectObjects(walls.current, true)[0];
 
-      const rray = new rapier.Ray(origin, tmp.dir);
+      rays.beam.origin.x = origin.x;
+      rays.beam.origin.y = origin.y;
+      rays.beam.origin.z = origin.z;
+      rays.beam.dir.x = tmp.dir.x;
+      rays.beam.dir.y = tmp.dir.y;
+      rays.beam.dir.z = tmp.dir.z;
       const wHit = world.castRay(
-        rray,
+        rays.beam,
         LASER_RANGE,
         true,
         undefined,
@@ -519,7 +536,7 @@ export default function Player({
         }
       }
     },
-    [camera, raycaster, tmp, world, rapier, collect, onTargetHit, wallHealth, laserPower, sendWallDamage],
+    [camera, raycaster, tmp, world, rays, onTargetHit, wallHealth, laserPower, sendWallDamage],
   );
 
   // Left button held -> keep firing; release -> let the beam fade.
@@ -627,9 +644,14 @@ export default function Player({
     tmp.dir.copy(tmp.cam).sub(tmp.look);
     const want = tmp.dir.length();
     tmp.dir.normalize();
-    const camRay = new rapier.Ray(tmp.look, tmp.dir);
+    rays.cam.origin.x = tmp.look.x;
+    rays.cam.origin.y = tmp.look.y;
+    rays.cam.origin.z = tmp.look.z;
+    rays.cam.dir.x = tmp.dir.x;
+    rays.cam.dir.y = tmp.dir.y;
+    rays.cam.dir.z = tmp.dir.z;
     const camHit = world.castRay(
-      camRay,
+      rays.cam,
       want,
       false,
       undefined,
@@ -670,8 +692,11 @@ export default function Player({
 
     // Grounded check + jump.
     tmp.origin.set(t.x, t.y, t.z);
+    rays.ground.origin.x = tmp.origin.x;
+    rays.ground.origin.y = tmp.origin.y;
+    rays.ground.origin.z = tmp.origin.z;
     const groundHit = world.castRay(
-      new rapier.Ray(tmp.origin, RAY_DOWN),
+      rays.ground,
       FOOT_OFFSET + 0.15,
       true,
       undefined,
@@ -698,8 +723,7 @@ export default function Player({
     // eases 0..1 with speed; phase only advances while actually moving.
     const wishSpeed = Math.hypot(tmp.wish.x, tmp.wish.z);
     const g = advanceGaitPhase(phase, gait, wishSpeed / SPEED, step);
-    const poseBone = makePoseBone(bones.current, rest.current);
-    const sw = applyGaitPose(poseBone, phase.current, g);
+    const sw = applyGaitPose(poseBone.current, phase.current, g);
     if (inner.current) {
       inner.current.position.y = fit.y + Math.abs(sw) * RUN_BOB_AMP * g;
     }
